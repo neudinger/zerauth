@@ -1,0 +1,91 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 30,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "Base",
+            "hidden": true,
+            "generator": "Ninja",
+            "environment": {
+                "CXX": "g++",
+                "CC": "gcc",
+                "INFER_CC": "/usr/bin/clang-20"
+            },
+            "description": "Base CMake configurations",
+            "cacheVariables": {
+                "DEBUG_CMAKE": "ON",
+                "USE_STATIC_LIBS": "ON",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_LINK_WHAT_YOU_USE": "OFF",
+                "BUILD_SHARED_LIBS": "OFF",
+                "FETCHCONTENT_QUIET": "OFF",
+                "LTO": "ON",
+                "CCACHE": "ON",
+                "OPENSSL_ROOT_DIR": "/usr/local/openssl",
+                "OPENSSL_LIBRARIES": "/usr/local/openssl/lib/",
+                "CPACK_OUTPUT_FILE_PREFIX": "${sourceDir}/dist",
+                "CPACK_PACKAGING_INSTALL_PREFIX": "/opt/",
+                "LINK_JOB_POOLS": "2",
+                "CPACK_DEBIAN_COMPRESSION_TYPE": "bzip2",
+                "_CMAKE_CXX_INCLUDE_WHAT_YOU_USE": "include-what-you-use"
+            }
+        },
+        {
+            "name": "Debug",
+            "displayName": "Debug Build",
+            "hidden": false,
+            "inherits": [
+                "Base"
+            ],
+            "description": "Sets up a Debug build that uses the default compiler and generator",
+            "binaryDir": "${sourceDir}/build_${presetName}-mchub",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "${presetName}",
+                "BUILD_DOCUMENTATION": "OFF",
+                "FETCHCONTENT_BASE_DIR": "${sourceDir}/.external_${presetName}",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist_${presetName}"
+            }
+        },
+        {
+            "name": "Release",
+            "displayName": "Release Build",
+            "hidden": false,
+            "inherits": [
+                "Base"
+            ],
+            "description": "Sets up a Release build that uses the default compiler and generator",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "${presetName}",
+                "BUILD_DOCUMENTATION": "OFF",
+                "FETCHCONTENT_BASE_DIR": "${sourceDir}/.external_${presetName}",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist_${presetName}/"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "Base",
+            "hidden": true,
+            "jobs": 8,
+            "targets": [
+                "zerauth"
+            ]
+        },
+        {
+            "name": "Debug",
+            "hidden": false,
+            "inherits": "Base",
+            "configurePreset": "Debug"
+        },
+        {
+            "name": "Release",
+            "hidden": false,
+            "inherits": "Base",
+            "configurePreset": "Release"
+        }
+    ]
+}
