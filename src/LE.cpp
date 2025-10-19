@@ -37,7 +37,7 @@
 #include <tuple>
 #include <vector>
 
-#include "datastructure/commitment_generated.h"
+#include "flatbuffer/commitment_generated.h"
 #include <array>
 #include <bit>
 #include <forward_list>
@@ -905,6 +905,7 @@ auto main(int argc, const char **argv) -> int {
   {
     // Sample data
     // Statement
+    //  openssl ecparam -list_curves
     std::vector<std::string> curve_names = {
         "secp256k1", "prime256v1", "wap-wsg-idm-ecid-wtls6", "c2pnb304w1"};
     std::vector<std::string> postulate_coordinates = {"p_coord1", "p_coord2",
@@ -929,7 +930,8 @@ auto main(int argc, const char **argv) -> int {
 
     // Load the schema file
     std::string schemafile;
-    if (!flatbuffers::LoadFile("commitment.fbs", false, &schemafile)) {
+    
+    if (!flatbuffers::LoadFile("flatb/commitment.fbs", false, &schemafile)) {
       std::cerr << "Failed to load schema file" << std::endl;
       return 1;
     }

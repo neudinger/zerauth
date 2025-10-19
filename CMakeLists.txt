@@ -19,13 +19,11 @@ endif("$ENV{zerauth_version}" STREQUAL "")
 project(
   zerauth
   LANGUAGES CXX
-  DESCRIPTION "Non-Interactive Zero-Knowledge Proof with Discrete Logarithm Equality across groups Extended "
+  DESCRIPTION
+    "Non-Interactive Zero-Knowledge Proof with Discrete Logarithm Equality across groups Extended "
   HOMEPAGE_URL "https://github.com/neudinger/zerauth"
-  VERSION ${zerauth_VERSION})
+  VERSION ${zerauth_version})
 
-set(CMAKE_C_STANDARD 23)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -33,20 +31,19 @@ set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
-set(CMAKE_BUILD_TYPE Debug)
+  set(CMAKE_BUILD_TYPE Debug)
 
-#   set(CMAKE_BUILD_TYPE RelWithDebInfo) 
-  
-#   remove_definitions(NDEBUG)
-  
+  # set(CMAKE_BUILD_TYPE RelWithDebInfo)
 
-#   add_compile_definitions(NDEBUG=1)
+  # remove_definitions(NDEBUG)
 
-#   set(CMAKE_BUILD_TYPE Release)
+  # add_compile_definitions(NDEBUG=1)
+
+  # set(CMAKE_BUILD_TYPE Release)
 endif(NOT CMAKE_BUILD_TYPE)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
-
+find_package(FlatBuffers CONFIG REQUIRED)
 find_program(CPPCHECK_EXE NAMES cppcheck REQUIRED)
 find_program(CLANG_FORMAT NAMES clang-format REQUIRED)
 find_program(CLANG_TIDY_EXE NAMES clang-tidy REQUIRED)
@@ -54,23 +51,28 @@ find_program(CPP_LINT NAMES cpplint REQUIRED)
 find_program(INFER NAMES infer REQUIRED)
 find_program(PMD NAMES pmd REQUIRED)
 option(CCACHE "Activation of CCACHE" ON)
+find_program(FLATBUFFER_FLATC NAMES flatc)
 
 if(CCACHE)
   find_program(CCACHE_PROGRAM NAMES ccache REQUIRED)
-  set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
   set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
 endif(CCACHE)
 
 find_package(OpenSSL 3.5.2 REQUIRED)
 find_package(Threads REQUIRED)
 
+set(ROOT_DIR ${CMAKE_SOURCE_DIR})
+list(APPEND CMAKE_MODULE_PATH ${ROOT_DIR}/cmake
+     ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+cmake_path(APPEND FLATBUFFER_PATH ${CMAKE_CURRENT_LIST_DIR} flatb)
 cmake_path(APPEND SRC_PATH ${PROJECT_SOURCE_DIR} src)
+
+include(FlatBuffGen)
 
 file(GLOB_RECURSE SRCS ${SRC_PATH}/*.cpp)
 include_directories(${PROJECT_SOURCE_DIR} ${SRC_PATH})
 add_executable(${PROJECT_NAME} ${SRCS})
-
 
 # https://clang.llvm.org/extra/clang-tidy/ -p ${CMAKE_SOURCE_DIR}
 # --config-file=${CMAKE_SOURCE_DIR} --enable-module-headers-parsing
@@ -99,8 +101,7 @@ set(CPPCHECK_OPTS
     --checkers-report=${CMAKE_CURRENT_BINARY_DIR}/cppcheck_report.txt
     --project=${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json)
 
-
-    add_custom_command(
+add_custom_command(
   OUTPUT CPPCHECK
   COMMAND
     ${CMAKE_COMMAND} -E echo "Running cppchecker..." && ${CMAKE_COMMAND} -E echo
@@ -111,7 +112,7 @@ set(CPPCHECK_OPTS
   COMMENT "Running Cppcheck static analysis"
   VERBATIM)
 
-add_custom_target(cppcheck ALL DEPENDS CPPCHECK)
+# add_custom_target(cppcheck ALL DEPENDS CPPCHECK)
 
 add_custom_target(
   clang_format
@@ -146,52 +147,36 @@ add_custom_target(
 # set_target_properties(${PROJECT_NAME} PROPERTIES CXX_CLANG_TIDY
 # "${CLANG_TIDY_COMMAND}")
 # add_custom_target(cpd COMMAND ${PMD} cpd --verbose --minimum-tokens 200
-#                               --language cpp --file-list ${SRCS})
-# add_dependencies(${PROJECT_NAME} cppcheck)
-# add_dependencies(${PROJECT_NAME} cpplint)
-# add_dependencies(${PROJECT_NAME} clang_format)
-# add_dependencies(${PROJECT_NAME} infer)
+# --language cpp --file-list ${SRCS}) add_dependencies(${PROJECT_NAME} cppcheck)
+# add_dependencies(${PROJECT_NAME} cpplint) add_dependencies(${PROJECT_NAME}
+# clang_format) add_dependencies(${PROJECT_NAME} infer)
 # add_dependencies(${PROJECT_NAME} cpd)
 
+# emcmake cmake -B build_add_lib && cmake --build build_add_lib emcc -O2 -s
+# WASM=1 -s SIDE_MODULE=1 -o add.wasm add.cpp emcc add.cpp -s
+# EXPORTED_FUNCTIONS="['_add']" -s SIDE_MODULE=1 -O2 -o add.wasm emcc add.cpp -o
+# add.wasm -s WASM=1 -s SIDE_MODULE=1 -O3
 
-# // flatc --cpp --gen-object-api --reflect-types --reflect-names
-# // --gen-json-emit
-# // --gen-mutable -I . -o datastructure commitment.fbs
+# target_compile_options( ${PROJECT_NAME} PRIVATE # Need libsan
+# -fsanitize=leak,address -fsanitize=thread # -fsanitize=address
+# -fno-omit-frame-pointer -fstack-protector-strong -fno-omit-frame-pointer -Wall
+# -Wextra -Wfatal-errors -Wpedantic -Werror -Wshadow -Wdouble-promotion
+# -Wformat=2 -Wformat-truncation -Wundef -fno-common -Wno-unknown-pragmas
+# -Wno-attributes -Wno-unknown-attributes -Wno-conversion)
 
-# target_compile_options(
-#   ${PROJECT_NAME}
-#   PRIVATE # Need libsan -fsanitize=leak,address -fsanitize=thread
-#           # -fsanitize=address -fno-omit-frame-pointer
-#           -fstack-protector-strong
-#           -fno-omit-frame-pointer
-#           -Wall
-#           -Wextra
-#           -Wfatal-errors
-#           -Wpedantic
-#           -Werror
-#           -Wshadow
-#           -Wdouble-promotion
-#           -Wformat=2
-#           -Wformat-truncation
-#           -Wundef
-#           -fno-common
-#           -Wno-unknown-pragmas
-#           -Wno-attributes
-#           -Wno-unknown-attributes
-#           -Wno-conversion)
-
+include_directories(${PROJECT_NAME} ${SRC_PATH}/flatbuffer)
 target_link_directories(${PROJECT_NAME} PRIVATE "/opt/lib/")
 target_link_directories(${PROJECT_NAME} PRIVATE "/usr/local/lib/")
-set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC ON LINK_SEARCH_END_STATIC ON)
+set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC ON
+                                                 LINK_SEARCH_END_STATIC ON)
 
-target_link_libraries(
-  ${PROJECT_NAME}
-    ssl.a
-    crypto.a
-    flatbuffers.a
-  )
+target_link_libraries(${PROJECT_NAME} ssl.a crypto.a flatbuffers.a)
 target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc"
                     "-static-libstdc++")
+
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_constexpr)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_${CMAKE_CXX_STANDARD})
-target_compile_features(${PROJECT_NAME} PRIVATE c_std_${CMAKE_C_STANDARD})
+
+foreach(FLATBUF_DEP IN LISTS FLATBUF_DEPS)
+  add_dependencies(${TARGET_NAME} ${FLATBUF_DEP})
+endforeach(FLATBUF_DEP IN LISTS FLATBUF_DEPS)

@@ -1,0 +1,37 @@
+Checks: [
+    performance*,
+    modernize*,
+    readability*,
+    # portability-*,
+    # zircon-*,
+    bugprone-narrowing-conversions,
+    -readability-function-cognitive-complexity,
+  ]
+ExtraArgsBefore:
+  [
+    -xc++,
+    -stdlib=libstdc++,
+    -std=c++latest,
+    -std=c++2b,
+    -std=c++23,
+    -std=gnu++2b
+    -stdlib=libc++
+    -I/usr/include/c++/13,
+    -I/usr/include/c++/14,
+    -I/usr/local/include,
+    -Wno-unknown-warning-option,
+  ]
+  # -Wall,
+  # -Wno-deprecated-declarations,
+
+WarningsAsErrors: "*"
+HeaderFileExtensions: ["", "h", "hh", "hpp", "hxx"]
+ImplementationFileExtensions: ["c", "cc", "cpp", "cxx"]
+HeaderFilterRegex: "^(?!.*toml\\.hpp).*$"
+FormatStyle: Google
+InheritParentConfig: true
+User: neudinger
+UseColor: true
+SystemHeaders: false
+CheckOptions:
+  readability-identifier-naming.VariableCase: lower_case

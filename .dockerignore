@@ -1,0 +1,49 @@
+syntax: glob
+# Ignore build output
+build*/
+install*/
+build-mk/
+data/
+*_packages/
+certificates-local/
+# Ignore IDE files
+.vscode/
+.info/
+.idea/
+# dependencies/
+*.suo
+*.sln
+# Ignore generated files
+*.o
+*.a
+*.so
+*.exe
+*.dll
+*.pyc
+*.pyo
+*.class
+*.out
+# Ignore backup files
+*~
+*.bak
+*.swp
+# Ignore temp files
+*.tmp
+*.log
+*.cache
+*.pem
+# Ignore data files
+*.orc
+*.parquet
+*.csv
+*.tar*
+*.appimage
+# In development
+openssl/
+examples/node
+examples/python
+built*/
+build*/
+.external*/
+openssl/
+!.devcontainer/

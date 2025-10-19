@@ -1,0 +1,93 @@
+syntax: glob
+# Ignore build output
+build*/
+install*/
+build-mk/
+data/
+*_packages/
+# Ignore IDE files
+# .vscode/
+# .devcontainer/
+.info/
+.enka/
+.idea/
+# dependencies/
+*.suo
+*.sln
+# Ignore generated files
+*.o
+*.a
+*.so
+*.exe
+*.dll
+*.pyc
+*.pyo
+*.class
+*.out
+*.deb
+# Ignore backup files
+*~
+*.bak
+*.swp
+# Ignore temp files
+*.tmp
+*.log
+*.cache
+# Ignore data files
+*.orc
+*.parquet
+*.csv
+*.tem
+*.tar*
+.config/
+# Ignore .env files
+.console.env
+.kiosk.env
+config/caddy-config.json
+# In development
+openssl/
+.build*/
+examples/node
+examples/python
+install_dir/
+.venv/
+compile_commands.json
+# Encryption keys
+# certificates/
+# *.crt
+# *.key
+# *.csr
+# *.pem
+# *.deb
+*.goprojects/
+Testing/
+dist*/
+.external_*/
+trace.json
+!.devcontainer
+# Documentation generated
+documentation/docs
+documentation/descriptor.pb
+*.diff
+*.3
+kiosk.toml
+mchub.toml
+mchub_*.toml
+!tests/python/mchub.toml
+*.logs
+CMakeCache.txt
+*.ast.sh
+!tests/*.toml
+mcapi_deb/
+portainer_data/
+!tests/mock-data/*.parquet
+.devcontainer/devcontainer.json
+# Mock data from mcapi
+tests/mock-data/import*
+tests/docker-compose.yml
+.devcontainer/devcontainer.json
+.continue/
+infer-out/
+cppcheck_report.txt
+tmp/
+old-bin/
