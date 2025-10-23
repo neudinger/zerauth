@@ -8,7 +8,7 @@ cmake --build --preset Debug
 
 
 ```bash
-ln -s build_Debug-mchub/compile_commands.json compile_commands.json
+ln --symbolic --force build_Debug-mchub/compile_commands.json compile_commands.json
 ```
 
 ```bash

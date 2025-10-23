@@ -1,0 +1,10 @@
+// Setup (Enrolement) phase of the sigma protocol
+namespace zerauth;
+
+table Setup {
+    curve_names: [string];
+    postulate_coordinates: [string];
+    commitment_coordinates: [string];
+}
+
+root_type Setup;

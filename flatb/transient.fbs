@@ -1,0 +1,13 @@
+include "setup_phase.fbs";
+include "proving_phase.fbs";
+
+namespace zerauth;
+
+
+table Transient {
+    setup : Setup;
+    proving: Proving;
+    challenge_coordinates: [string];
+}
+
+root_type Transient;

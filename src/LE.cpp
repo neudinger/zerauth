@@ -5,6 +5,10 @@
 #include <ranges>
 
 #include <flatbuffers/flatbuffer_builder.h>
+#include <flatbuffers/flatbuffers.h>
+#include <flatbuffers/idl.h>
+#include <flatbuffers/reflection.h>
+#include <flatbuffers/util.h>
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
 #include <openssl/ec.h>
@@ -37,14 +41,12 @@
 #include <tuple>
 #include <vector>
 
-#include "flatbuffer/commitment_generated.h"
 #include <array>
-#include <bit>
-#include <forward_list>
+#include <flatbuffer/proving_phase_generated.h>
+#include <flatbuffer/setup_phase_generated.h>
+#include <flatbuffer/transient_generated.h>
 #include <ios>
 #include <span>
-#include <stddef.h>
-#include <stdlib.h>
 #include <type_traits>
 
 void printEC_POINT(const EC_GROUP *group, const char *msg,
@@ -89,12 +91,12 @@ namespace crypto {
 
 #define ASSIGN_OR_UNEXPECTED_NAME(x, y) CONCAT(x, y)
 #define ASSIGN_OR_UNEXPECTED_IMPL(result_name, definition, expression) \
-  auto const &result_name = (expression);                              \
+  auto &&result_name = (expression);                                   \
   if (not(result_name.has_value())) [[likely]] {                       \
     return std::unexpected(std::format("{} : {}", result_name.error(), \
                                        ERR_error_string(0, nullptr))); \
   }                                                                    \
-  definition = result_name.value();
+  definition = std::move(result_name.value());
 #define ASSIGN_OR_UNEXPECTED(definition, expression)                        \
   ASSIGN_OR_UNEXPECTED_IMPL(                                                \
       ASSIGN_OR_UNEXPECTED_NAME(_error_or_value_, __COUNTER__), definition, \
@@ -140,7 +142,7 @@ auto get_ec_group_by_curves_name(std::vector<std::string> const &curves_name)
   std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
   ec_group_by_curves_name.reserve(curves_name.size());
   for (auto const &curve_name : curves_name) {
-    auto curve_nid = OBJ_sn2nid(curve_name.c_str());
+    auto const curve_nid = OBJ_sn2nid(curve_name.c_str());
     if (curve_nid == NID_undef) {
       return std::unexpected(
           std::format("Can not find the nid of ({})", curve_name));
@@ -149,7 +151,7 @@ auto get_ec_group_by_curves_name(std::vector<std::string> const &curves_name)
         EC_GROUP_new_by_curve_name(curve_nid), ::EC_GROUP_free};
     OSSL_CHECK_NULL_OR_UNEXPECTED(
         ec_group_unique_ptr,
-        std::format("Can not create group for the nid : {} : ", curve_nid));
+        std::format("Can not create group for the nid : ({}) : ", curve_nid));
     ec_group_by_curves_name.emplace_back(std::move(ec_group_unique_ptr));
   }
   return ec_group_by_curves_name;
@@ -177,9 +179,9 @@ auto BIGNUM_to_hex(BN_unique_ptr const &bignumber)
   return std::string{num_hex_str.get(), std::strlen(num_hex_str.get())};
 }
 
-auto EC_POINT_to_hex(
-    std::tuple<EC_GROUP_unique_ptr, EC_POINT_unique_ptr> const &group_point)
-    -> std::expected<std::string const, std::string> {
+auto EC_POINT_to_hex(std::tuple<EC_GROUP_unique_ptr const &,
+                                EC_POINT_unique_ptr const &> &&group_point)
+    -> std::expected<std::string, std::string> {
   auto const &[group, point]{group_point};
 
   CRYPTO_char_unique_ptr const point_position_hex_str{
@@ -193,6 +195,25 @@ auto EC_POINT_to_hex(
 
   return std::string{point_position_hex_str.get(),
                      std::strlen(point_position_hex_str.get())};
+}
+
+auto EC_POINTS_to_hex(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
+                      std::vector<EC_POINT_unique_ptr> const &ec_points)
+    -> std::expected<std::vector<std::string>, std::string> {
+  if (ec_groups.size() not_eq ec_points.size()) {
+    std::unexpected("ec_groups and ec_points do not have the same size");
+  }
+  std::vector<std::string> point_hex;
+  point_hex.reserve(ec_groups.size());
+
+  for (auto const &[group, point] :
+       std::ranges::views::zip(ec_groups, ec_points)) {
+    ASSIGN_OR_UNEXPECTED(auto &&ec_point_to_hex,
+                         EC_POINT_to_hex(std::forward_as_tuple(group, point)))
+    point_hex.push_back(std::move(ec_point_to_hex));
+  }
+
+  return point_hex;
 }
 
 // short name in parameter
@@ -244,37 +265,6 @@ auto generate_random_group_scalar(EC_GROUP_unique_ptr const &group)
       "Cannot get group order : "sv);
   OSSL_CHECK_OR_UNEXPECTED(BN_rand_range(random_scalar.get(), order.get()),
                            "Cannot get random scalar : "sv);
-  return random_scalar;
-}
-
-auto generate_random_groups_scalar(
-    std::tuple<EC_GROUP_unique_ptr const, EC_GROUP_unique_ptr const> const
-        &groups) -> std::expected<BN_unique_ptr const, std::string> {
-  auto const &[group_g, group_h]{groups};
-  BN_CTX_unique_ptr bn_ctx{BN_CTX_unique_ptr(BN_CTX_new(), ::BN_CTX_free)};
-  BN_unique_ptr order_mean{BN_unique_ptr(BN_new(), ::BN_free)};
-  BN_unique_ptr order_g{BN_unique_ptr(BN_new(), ::BN_free)};
-  BN_unique_ptr order_h{BN_unique_ptr(BN_new(), ::BN_free)};
-  BN_unique_ptr order_length{BN_unique_ptr(BN_new(), ::BN_free)};
-  BN_unique_ptr random_scalar{BN_unique_ptr(BN_new(), ::BN_free)};
-
-  OSSL_CHECK_OR_UNEXPECTED(BN_dec2bn((BIGNUM **)&(*order_length), "2"),
-                           "Cannot convert decimal string to BIG NUMBER"sv)
-
-  OSSL_CHECK_OR_UNEXPECTED(
-      EC_GROUP_get_order(group_g.get(), order_g.get(), nullptr),
-      "Can not get order of group g : "sv);
-  OSSL_CHECK_OR_UNEXPECTED(
-      EC_GROUP_get_order(group_h.get(), order_h.get(), nullptr),
-      "Can not get order of group h : "sv);
-  OSSL_CHECK_OR_UNEXPECTED(
-      BN_add(order_mean.get(), order_h.get(), order_h.get()),
-      "Can not execute add operation : "sv);
-  OSSL_CHECK_OR_UNEXPECTED(BN_div(order_mean.get(), nullptr, order_mean.get(),
-                                  order_length.get(), bn_ctx.get()),
-                           "Can not execute division operation : "sv);
-  OSSL_CHECK_OR_UNEXPECTED(BN_rand_range(random_scalar.get(), order_mean.get()),
-                           "Can not execute random range operation : "sv);
   return random_scalar;
 }
 
@@ -378,7 +368,7 @@ auto generate_commitment(
   return commitments;
 }
 
-auto generate_transient_chalenge(
+auto generate_transient_challenge(
     std::vector<EC_GROUP_unique_ptr> const &ec_groups,
     std::vector<EC_POINT_unique_ptr> const &postulate_random_points)
     -> std::expected<
@@ -405,7 +395,8 @@ auto generate_transient_chalenge(
                                     nonce_group_number.get()),
                              "ERROR BN_add");
   }
-  BN_CTX_unique_ptr bn_ctx{BN_CTX_unique_ptr(BN_CTX_new(), ::BN_CTX_free)};
+  BN_CTX_unique_ptr const bn_ctx{
+      BN_CTX_unique_ptr(BN_CTX_new(), ::BN_CTX_free)};
 
   OSSL_CHECK_OR_UNEXPECTED(BN_div(order_mean.get(), nullptr, order_mean.get(),
                                   order_length.get(), bn_ctx.get()),
@@ -515,9 +506,6 @@ auto verify(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
     if (EC_POINT_cmp(ec_group.get(), transient_point.get(),
                      point_step_three.get(), nullptr) not_eq 0) {
       std::println("Verification failed");
-      printEC_POINT(ec_group.get(), "transient_point ", transient_point.get());
-      printEC_POINT(ec_group.get(), "point_step_three ",
-                    point_step_three.get());
       return false;
     }
   }
@@ -526,361 +514,73 @@ auto verify(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
   return true;
 }
 
-//  Verify(groups,
-//                       {c_challenge, r_response, vg_commitment,
-//                       vh_commitment}, postulate_random_points, // v
-//                       {xg_scalar, xh_scalar})
-
-namespace otp {
-
-// Helper function to convert the current time to a TOTP time step
-constexpr uint64_t default_time_step{30UL};
-inline auto getTimeStep(uint64_t time_step = default_time_step) -> uint64_t {
-  return std::time(nullptr) / time_step;
-}
-
-template <Integral integer>
-inline auto integer_to_bytes(integer const &value)
-    -> std::array<std::byte, sizeof(integer)> {
-  // Use std::bit_cast to reinterpret the integer as a std::byte array
-  return std::bit_cast<std::array<std::byte, sizeof(integer)>>(value);
-}
-
-template <Integral integer>
-inline void printBytes(std::span<const std::byte> const &bytes) {
-  // Use ranges to create a hex string for bytes and use std::println
-  for (auto const &byte : bytes | std::views::transform([](std::byte __b) {
-                            return std::to_integer<integer>(__b);
-                          })) {
-    std::println("{:02x} ", byte);  // Print in hexadecimal format
-  }
-}
-
-// auto
-// generate_hmac(std::string_view const& hashing_algorithm_name)
-//   -> std::expected<std::string const, std::string>
-// {
-//   char* data = nullptr;
-//   uint64_t data_length{};
-//   EVP_MD_CTX_unique_ptr const evp_md_ctx{ EVP_MD_CTX_new(), ::EVP_MD_CTX_free
-//   }; OSSL_CHECK_NULL_OR_UNEXPECTED(
-//     evp_md_ctx, "Cannot initialize message digests context : "sv)
-//   EVP_MD_unique_ptr const evp_md{
-//     EVP_MD_fetch(nullptr, hashing_algorithm_name.data(), nullptr),
-//     ::EVP_MD_free
-//   };
-//   EVP_DigestInit_ex(evp_md_ctx.get(), evp_md.get(), nullptr);
-//   EVP_DigestUpdate(evp_md_ctx.get(),
-//                    hashing_algorithm_name.data(),
-//                    hashing_algorithm_name.length());
-//   EVP_DigestFinal_ex(evp_md_ctx, result, resultLength);
-// }
-
-} /* namespace otp  */
-
 }  // namespace crypto
 
-// Function to generate an HMAC-SHA1 hash using OpenSSL 3.0
-unsigned char *generateHMAC(const unsigned char *data, int dataLength,
-                            unsigned char *result, unsigned int *resultLength) {
-  EVP_MD_CTX *evp_md_ctx = EVP_MD_CTX_new();
-  EVP_MD *evp_md = EVP_MD_fetch(nullptr, "SHA1", nullptr);
-  EVP_DigestInit_ex(evp_md_ctx, evp_md, nullptr);
-  EVP_DigestUpdate(evp_md_ctx, data, dataLength);
+template <typename VerifierType>
+auto debug_print_flatbuffer(std::span<const uint8_t> const &buffer,
+                            std::string const &schema_file,
+                            std::vector<std::string> const &include_dir = {}) {
+  // Load the schema file
+  std::string schemafile;
 
-  EVP_DigestFinal_ex(evp_md_ctx, result, resultLength);
-  EVP_MD_CTX_free(evp_md_ctx);
-
-  return result;
-}
-
-// Function to generate a TOTP code
-std::string generateTOTP(const std::string &secretKey, int digits = 6,
-                         int timeStep = crypto::otp::default_time_step) {
-  // Convert the secret key to a byte array
-  const unsigned char *key =
-      reinterpret_cast<const unsigned char *>(secretKey.c_str());
-  int keyLength = secretKey.length();
-
-  // Get the current time step
-  uint64_t currentTimeStep = crypto::otp::getTimeStep(timeStep);
-
-  // Convert the time step to a byte array (8 bytes)
-  auto data = crypto::otp::integer_to_bytes(currentTimeStep);
-
-  // Generate the HMAC-SHA1 hash
-  constexpr auto sha1_digest_length{20U};
-  // std::array<uint8_t, sha1_digest_length> hash;
-  unsigned char hmacResult[sha1_digest_length];
-  unsigned int hmacLength = 0;
-  generateHMAC((const unsigned char *)data.cbegin(), data.size(), hmacResult,
-               &hmacLength);
-
-  // Dynamic truncation to extract a 4-byte integer from the hash
-  int offset =
-      hmacResult[hmacLength - 1] & 0x0F;  // Use the last nibble as the offset
-  uint32_t binaryCode = (hmacResult[offset] & 0x7F) << 24 |
-                        (hmacResult[offset + 1] & 0xFF) << 16 |
-                        (hmacResult[offset + 2] & 0xFF) << 8 |
-                        (hmacResult[offset + 3] & 0xFF);
-
-  // Compute the TOTP value by taking the modulo with 10^digits
-  uint32_t otp = binaryCode % static_cast<uint32_t>(pow(10, digits));
-
-  // Format the OTP with leading zeros if needed
-  std::stringstream ss;
-  ss << std::setw(digits) << std::setfill('0') << otp;
-  return ss.str();
-}
-
-// https://eprint.iacr.org/2022/1593.pdf
-// http://fc13.ifca.ai/proc/5-1.pdf
-
-// Logarithm Equality (DLEQ) proof
-// https://asecuritysite.com/encryption/go_dleq
-
-// Helper function to print EC_POINT values in hexadecimal
-
-auto generate_random_scalar(EC_GROUP const *group) -> BIGNUM * {
-  BIGNUM *order = BN_new();
-  BIGNUM *random_scalar = BN_new();
-  EC_GROUP_get_order(group, order, nullptr);
-  BN_rand_range(random_scalar, order);
-  BN_free(order);
-  return random_scalar;
-}
-
-auto generate_random_scalar(
-    std::tuple<EC_GROUP const *, EC_GROUP const *> const groups) -> BIGNUM * {
-  auto const &[group_g, group_H]{groups};
-  BN_CTX *ctx = BN_CTX_new();
-  BIGNUM *order_mean = BN_new();
-  BIGNUM *order_g = BN_new();
-  BIGNUM *order_h = BN_new();
-  BIGNUM *order_length = BN_new();
-  BIGNUM *random_scalar = BN_new();
-  assert(BN_dec2bn(&order_length, "2") == 1);
-
-  EC_GROUP_get_order(group_g, order_g, nullptr);
-  EC_GROUP_get_order(group_H, order_h, nullptr);
-
-  BN_add(order_mean, order_h, order_h);
-  BN_add(order_mean, order_g, order_g);
-
-  BN_div(order_mean, nullptr, order_mean, order_length, ctx);
-
-  BN_rand_range(random_scalar, order_mean);
-  BN_free(order_mean);
-  BN_free(order_g);
-  BN_free(order_h);
-
-  return random_scalar;
-}
-
-auto generate_random_point(EC_GROUP const *group) -> EC_POINT * {
-  BN_CTX *ctx = BN_CTX_new();
-  const EC_POINT *generator = EC_GROUP_get0_generator(group);
-  EC_POINT *point = EC_POINT_dup(generator, group);
-  BIGNUM *random_scalar = generate_random_scalar(group);
-  BIGNUM const *order = EC_GROUP_get0_order(group);
-  printBN("Big random_scalar ", random_scalar);
-  assert(BN_div(nullptr, random_scalar, random_scalar, order, ctx) == 1);
-  printBN("Big random_scalar ", random_scalar);
-  assert(EC_POINT_mul(group, point, nullptr, point, random_scalar, nullptr) ==
-         1);
-  return point;
-}
-
-// Commitment Registration
-auto generate_challenge_commitment(
-    std::tuple<EC_GROUP const *, EC_GROUP const *> const groups,
-    std::tuple<EC_POINT const *, EC_POINT const *> const
-        postulate_random_points,
-    BIGNUM const *x_secret) -> std::tuple<EC_POINT *, EC_POINT *> {
-  auto const &[group_g, group_H]{groups};
-
-  const auto &[postulate_point_g, postulate_point_h] = postulate_random_points;
-  // BIGNUM const* order_g = EC_GROUP_get0_order(group_g);
-  // BIGNUM const* order_h = EC_GROUP_get0_order(group_H);
-  // printBN("order ", order);
-
-  // =======
-  // xG = x * G;
-  EC_POINT *xG = EC_POINT_new(group_g);
-  printEC_POINT(group_g, "G ", postulate_point_g);
-  assert(EC_POINT_mul(group_g, xG, nullptr, postulate_point_g, x_secret,
-                      nullptr) == 1);
-  printEC_POINT(group_g, "xG ", xG);
-
-  // xH = x * H;
-  EC_POINT *xH = EC_POINT_new(group_H);
-  printEC_POINT(group_H, "H ", postulate_point_h);
-  assert(EC_POINT_mul(group_H, xH, nullptr, postulate_point_h, x_secret,
-                      nullptr) == 1);
-  printEC_POINT(group_H, "xH ", xH);
-
-  return {xG, xH};
-}
-
-auto generate_chalenge_from_commitment(
-    std::tuple<EC_GROUP const *, EC_GROUP const *> const groups,
-    std::tuple<EC_POINT const *, EC_POINT const *> const
-        postulate_random_points)
-    -> std::tuple<BIGNUM *, EC_POINT *, EC_POINT *> {
-  auto const &[group_g, group_H]{groups};
-
-  auto const &[G, H] = postulate_random_points;
-
-  BIGNUM *v_commitment = generate_random_scalar(groups);
-  printBN("v_commitment ", v_commitment);
-
-  // vG = v * G
-  EC_POINT *vg_point = EC_POINT_new(group_g);
-  assert(EC_POINT_mul(group_g, vg_point, nullptr, G, v_commitment, nullptr) ==
-         1);
-  printEC_POINT(group_g, "vG ", vg_point);
-
-  // vH = v * H
-  EC_POINT *vh_point = EC_POINT_new(group_H);
-  assert(EC_POINT_mul(group_H, vh_point, nullptr, H, v_commitment, nullptr) ==
-         1);
-  printEC_POINT(group_H, "vH ", vh_point);
-
-  return {v_commitment, vg_point, vh_point};
-}
-
-auto generate_challenge(
-    std::tuple<EC_GROUP const *, EC_GROUP const *> const groups,
-    EC_POINT const *xG, EC_POINT const *xH, EC_POINT const *vG,
-    EC_POINT const *vH) -> BIGNUM * {
-  auto const &[group_g, group_H]{groups};
-  // BN_CTX* ctx = BN_CTX_new();
-  EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
-  EVP_MD *evp_md = EVP_MD_fetch(nullptr, "SHA256", nullptr);
-  EVP_DigestInit_ex(mdctx, evp_md, nullptr);
-
-  // BIGNUM const* order = EC_GROUP_get0_order(group);
-  // BIGNUM const* order = EC_GROUP_get0_order(group);
-
-  BIGNUM *c_challenge = BN_new();
-
-  std::array<uint8_t, SHA256_DIGEST_LENGTH> hash;
-
-  uint8_t *buf;
-  assert(EC_POINT_point2buf(group_g, xG, POINT_CONVERSION_COMPRESSED, &buf,
-                            nullptr) > 0);
-  EVP_DigestUpdate(mdctx, buf, strlen((char *)buf));
-  OPENSSL_free(buf);
-
-  assert(EC_POINT_point2buf(group_H, xH, POINT_CONVERSION_COMPRESSED, &buf,
-                            nullptr) > 0);
-  EVP_DigestUpdate(mdctx, buf, strlen((char *)buf));
-  free(buf);
-
-  assert(EC_POINT_point2buf(group_g, vG, POINT_CONVERSION_COMPRESSED, &buf,
-                            nullptr) > 0);
-  EVP_DigestUpdate(mdctx, buf, strlen((char *)buf));
-  free(buf);
-
-  assert(EC_POINT_point2buf(group_H, vH, POINT_CONVERSION_COMPRESSED, &buf,
-                            nullptr) > 0);
-  EVP_DigestUpdate(mdctx, buf, strlen((char *)buf));
-  free(buf);
-
-  EVP_DigestFinal_ex(mdctx, hash.data(), nullptr);
-  EVP_MD_CTX_free(mdctx);
-
-  BN_bin2bn(hash.data(), SHA256_DIGEST_LENGTH, c_challenge);
-
-  printBN("c ", c_challenge);
-
-  return c_challenge;
-}
-
-auto solve_challenge(BIGNUM const *x_secret, BIGNUM const *c_challenge,
-                     BIGNUM const *v_commitment) -> BIGNUM * {
-  BN_CTX *ctx = BN_CTX_new();
-  // BIGNUM const* order = EC_GROUP_get0_order(group);
-  BIGNUM *r_response = BN_new();
-
-  //  r = (v - (x * c))
-  // r_response = (v_commitment - (x_secret * c_challenge))
-  assert(BN_mul(r_response, x_secret, c_challenge, ctx) == 1);
-  printBN("r ", r_response);
-  printBN("v ", v_commitment);
-
-  assert(BN_sub(r_response, v_commitment, r_response) == 1);
-  printBN("r ", r_response);
-  // assert(BN_div(nullptr, r_response, r_response, order, ctx) == 1);
-  // printBN("r ", r_response);
-  return r_response;
-}
-
-// use a traditional Weierstrass elliptic curve
-// g++ -std=c++23 -g LE.cpp -lcrypto -lssl && ./a.out
-
-auto Verify(std::tuple<EC_GROUP const *, EC_GROUP const *> const groups,
-            std::tuple<BIGNUM const *, BIGNUM const *, EC_POINT *,
-                       EC_POINT *> const proof,
-            std::tuple<EC_POINT const *, EC_POINT const *> const
-                postulate_random_points,
-            std::tuple<EC_POINT const *, EC_POINT const *> const commitment) {
-  auto const &[group_g, group_H]{groups};
-
-  auto const &[g_point, h_point] = postulate_random_points;
-
-  auto const &[c, r, vg_point, vh_point] = proof;
-
-  auto const &[xG, xH] = commitment;
-
-  // rG = r * G
-  EC_POINT *const rg_point = EC_POINT_new(group_g);
-  assert(EC_POINT_mul(group_g, rg_point, nullptr, g_point, r, nullptr) == 1);
-  printEC_POINT(group_g, "rG ", rg_point);
-  // cxG = c * xG
-  EC_POINT *const cxg_point = EC_POINT_new(group_g);
-  assert(EC_POINT_mul(group_g, cxg_point, nullptr, xG, c, nullptr) == 1);
-  printEC_POINT(group_g, "cxG ", cxg_point);
-  // a = rG + cxG
-  EC_POINT *const a = EC_POINT_new(group_g);
-  assert(EC_POINT_add(group_g, a, rg_point, cxg_point, nullptr) == 1);
-  printEC_POINT(group_g, "a  ", a);
-
-  // rH = r * H
-  EC_POINT *const rh_point = EC_POINT_new(group_H);
-  assert(EC_POINT_mul(group_H, rh_point, nullptr, h_point, r, nullptr) == 1);
-  printEC_POINT(group_H, "rH ", rh_point);
-  // cxH = c * xH
-  EC_POINT *const cxh_point = EC_POINT_new(group_H);
-  assert(EC_POINT_mul(group_H, cxh_point, nullptr, xH, c, nullptr) == 1);
-  printEC_POINT(group_H, "cxH ", cxh_point);
-  // b = rH + cxH
-  EC_POINT *const b = EC_POINT_new(group_H);
-  assert(EC_POINT_add(group_H, b, rh_point, cxh_point, nullptr) == 1);
-  printEC_POINT(group_H, "b ", b);
-
-  printEC_POINT(group_g, "vG ", vg_point);
-  printEC_POINT(group_g, "a ", a);
-  printEC_POINT(group_H, "vH ", vh_point);
-  printEC_POINT(group_H, "b ", b);
-  std::cout << EC_POINT_cmp(group_g, vg_point, a, nullptr) << std::endl;
-  std::cout << EC_POINT_cmp(group_H, vh_point, b, nullptr) << std::endl;
-
-  bool success = ((EC_POINT_cmp(group_g, vg_point, a, nullptr) == 0) &&
-                  (EC_POINT_cmp(group_H, vh_point, b, nullptr) == 0));
-
-  if (success) {
-    std::cout << "Alice has proven to bob she know the password" << std::endl;
-  } else {
-    std::cout << "Verification failed!" << std::endl;
+  std::vector<const char *> include_pointers;
+  include_pointers.reserve(include_dir.size());
+  for (const auto &str : include_dir) {
+    include_pointers.push_back(str.c_str());
   }
-  return success;
-}
+  const char **paths_for_func = include_pointers.data();
 
-#include "flatbuffers/flatbuffers.h"
-#include "flatbuffers/idl.h"
-#include "flatbuffers/reflection.h"
-#include "flatbuffers/util.h"
+  if (!flatbuffers::LoadFile(schema_file.c_str(), false, &schemafile)) {
+    std::println("Failed to load schema file {}", schema_file);
+    return;
+  }
+  flatbuffers::Parser parser;
+  parser.opts.indent_step = 2;  // pretty JSON
+
+  if (!parser.Parse(schemafile.c_str(), paths_for_func)) {
+    std::println("Schema parse failed: -- {}", schemafile);
+    return;
+  }
+
+  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
+
+  if constexpr (std::same_as<VerifierType, zerauth::Setup>) {
+    if (!zerauth::VerifySetupBuffer(verifier)) {
+      std::println("VerifySetupBuffer verification failed");
+      return;
+    }
+  } else if (std::same_as<VerifierType, zerauth::Proving>) {
+    if (!zerauth::VerifyProvingBuffer(verifier)) {
+      std::println("VerifyProvingBuffer verification failed");
+      return;
+    }
+  } else if (std::same_as<VerifierType, zerauth::Transient>) {
+    if (!zerauth::VerifyTransientBuffer(verifier)) {
+      std::println("VerifyTransientBuffer verification failed");
+      return;
+    }
+  } else {
+    std::println("Buffer verification failed");
+    return;
+  }
+
+  if (parser.root_struct_def_ == nullptr) {
+    std::println("No root type defined in schema");
+    return;
+  }
+
+  std::println("Root type: {}", parser.root_struct_def_->name);
+
+  std::string json;
+  auto const *const err =
+      flatbuffers::GenerateText(parser, buffer.data(), &json);
+
+  if (err not_eq nullptr) {
+    std::println("Failed to generate JSON {}", err);
+    return;
+  }
+  std::println("json gen : {}", json);
+}
 
 // g++ -fno-elide-constructors -std=c++23 -g LE.cpp
 // /usr/local/lib/libflatbuffers.a -lcrypto -lssl && ./a.out
@@ -888,6 +588,8 @@ auto Verify(std::tuple<EC_GROUP const *, EC_GROUP const *> const groups,
 //  openssl ecparam
 // -list_curves
 
+// https://eprint.iacr.org/2022/1593.pdf
+// http://fc13.ifca.ai/proc/5-1.pdf
 // https://sebastiaagramunt.medium.com/discrete-logarithm-problem-and-diffie-hellman-key-exchange-821a45202d26
 
 // https://www.getmonero.org/resources/research-lab/pubs/MRL-0010.pdf
@@ -900,272 +602,155 @@ auto Verify(std::tuple<EC_GROUP const *, EC_GROUP const *> const groups,
 // https://github.com/sdiehl/schnorr-nizk
 // https://docs.zkproof.org/pages/standards/accepted-workshop4/proposal-sigma.pdf
 auto main(int argc, const char **argv) -> int {
-  flatbuffers::FlatBufferBuilder builder(1024);
+  // Sample data
+  // Statement
+  //  openssl ecparam -list_curves
+  std::vector<std::string> curve_names = {
+      "secp256k1", "prime256v1", "wap-wsg-idm-ecid-wtls6", "c2pnb304w1"};
+
+  auto get_ec_group_by_curves_name_expected =
+      crypto::get_ec_group_by_curves_name(curve_names);
+
+  if (not get_ec_group_by_curves_name_expected.has_value()) {
+    std::println("get_ec_group_by_curves_name_expected error {}",
+                 get_ec_group_by_curves_name_expected.error());
+    exit(1);
+  }
+
+  auto &&ec_groups = std::move(get_ec_group_by_curves_name_expected.value());
+  auto &&postulate_random_points_expected =
+      crypto::generate_random_points_from(ec_groups);
+  std::println("get_ec_group_by_curves_name_expected {}", ec_groups.size());
+
+  if (not postulate_random_points_expected.has_value()) {
+    std::println("postulate_nonce_points_expected error {}",
+                 postulate_random_points_expected.error());
+    exit(1);
+  }
+
+  auto const &&postulate_random_points =
+      std::move(postulate_random_points_expected.value());
+  std::println("postulate_nonce_points {}", postulate_random_points.size());
+
+  auto const &&secret = crypto::hash_to_BIGNUM({"password"});
+  printBN("secret =  ", secret.get());
+
+  auto &&commitment_expected =
+      crypto::generate_commitment(ec_groups, postulate_random_points, secret);
+
+  if (not commitment_expected.has_value()) {
+    std::println("commitments_expected error {}", commitment_expected.error());
+    exit(1);
+  }
+
+  auto const &&commitments = std::move(commitment_expected.value());
+  std::println("commitments {}", commitments.size());
+  auto &&postulate_random_points_hex =
+      crypto::EC_POINTS_to_hex(ec_groups, postulate_random_points);
+
+  auto &&commitments_points_hex =
+      crypto::EC_POINTS_to_hex(ec_groups, commitments);
 
   {
-    // Sample data
-    // Statement
-    //  openssl ecparam -list_curves
-    std::vector<std::string> curve_names = {
-        "secp256k1", "prime256v1", "wap-wsg-idm-ecid-wtls6", "c2pnb304w1"};
-    std::vector<std::string> postulate_coordinates = {"p_coord1", "p_coord2",
-                                                      "p_coord2"};
-    std::vector<std::string> commitment_coordinates = {"c_coord1", "c_coord2",
-                                                       "p_coord2"};
-
-    auto sigma = /* NIDLEQ:: */ CreateSigma(
+    flatbuffers::FlatBufferBuilder builder;
+    auto setup_buffer = zerauth::CreateSetup(
         builder, builder.CreateVectorOfStrings(curve_names),
-        builder.CreateVectorOfStrings(postulate_coordinates),
-        builder.CreateVectorOfStrings(commitment_coordinates));
-    builder.Finish(sigma);  // ✅ sets root
-    // Build the Sigma table
-    // /* NIDLEQ:: */SigmaBuilder sigma_builder(builder);
-    // sigma_builder.add_curve_name(curve_names_offset);
-    // sigma_builder.add_postulate_coordinate(postulate_coordinates_offset);
-    // sigma_builder.add_commitment_coordinate(commitment_coordinates_offset);
-    // auto sigma_offset = sigma_builder.Finish();
-    // builder.Finish(sigma_offset);
-    const uint8_t *buffer = builder.GetBufferPointer();
-    size_t size = builder.GetSize();
+        builder.CreateVectorOfStrings(postulate_random_points_hex.value()),
+        builder.CreateVectorOfStrings(commitments_points_hex.value()));
+    // Build the Setup table
+    builder.Finish(setup_buffer);  // ✅ sets root
+                                   // zerauth::VerifySetupBuffer
+    debug_print_flatbuffer<zerauth::Setup>(
+        {builder.GetBufferPointer(), builder.GetSize()},
+        "flatb/setup_phase.fbs", {"flatb/"});
+  }
 
-    // Load the schema file
-    std::string schemafile;
-    
-    if (!flatbuffers::LoadFile("flatb/commitment.fbs", false, &schemafile)) {
-      std::cerr << "Failed to load schema file" << std::endl;
-      return 1;
-    }
-    flatbuffers::Parser parser;
-    parser.opts.indent_step = 2;  // pretty JSON
+  // The Prover send to the verifer the postulate and the commitments (in
+  // enrolement process) The Verifier generate the transient challenge and
+  // send it to the prover
 
-    if (!parser.Parse(schemafile.c_str())) {
-      std::cerr << "Schema parse failed" << std::endl;
-      return 1;
-    }
+  // Alice ask bob to prove that she knows the password, so bob generate the
+  // transient challenge (transient_points) based on the
+  // postulate_random_points placed on ther respective eliptic curve group and
+  // send the transient nonce to Alice
+  auto &&transient_challenge_expected =
+      crypto::generate_transient_challenge(ec_groups, postulate_random_points);
 
-    flatbuffers::Verifier verifier(buffer, size);
-    if (!/* NIDLEQ:: */ VerifySigmaBuffer(verifier)) {
-      std::cerr << "Buffer verification failed" << std::endl;
-      return 1;
-    }
+  if (not transient_challenge_expected.has_value()) {
+    std::println("transient_challenge_expected error {}",
+                 transient_challenge_expected.error());
+    exit(1);
+  }
+  auto const &&transient_challenge =
+      std::move(transient_challenge_expected.value());
+  auto &&[nonce, transient_points] = transient_challenge;
+  std::println("transient_challenge {}", transient_points.size());
 
-    if (!parser.root_struct_def_) {
-      std::cerr << "No root type defined in schema" << std::endl;
-      return 1;
-    }
-    std::cout << "Root type: " << parser.root_struct_def_->name << std::endl;
+  auto challenge_expected =
+      crypto::generate_challenge(ec_groups, commitments, transient_points);
 
-    std::string json;
-    auto err = flatbuffers::GenerateText(parser, buffer, &json);
-    if (err) {
-      std::cerr << "Failed to generate JSON " << err << std::endl;
-      return 1;
-    }
-    // std::println("json_output {}", json);
+  if (not challenge_expected.has_value()) {
+    std::println("challenge_expected error {}", challenge_expected.error());
+    exit(1);
+  }
+  // Bob also send the challenge generated from the commitment and the
+  // transient nonce to Alice
+  auto const &&challenge = std::move(challenge_expected.value());
+  {
+    auto &&nonce_hex = crypto::BIGNUM_to_hex(nonce);
+    auto &&challenge_hex = crypto::BIGNUM_to_hex(challenge);
 
-    auto get_ec_group_by_curves_name_expected =
-        crypto::get_ec_group_by_curves_name(curve_names);
-
-    if (not get_ec_group_by_curves_name_expected.has_value()) {
-      std::println("get_ec_group_by_curves_name_expected error {}",
-                   get_ec_group_by_curves_name_expected.error());
-      exit(1);
-    }
-
-    auto &&ec_groups = std::move(get_ec_group_by_curves_name_expected.value());
-    auto &&postulate_random_points_expected =
-        crypto::generate_random_points_from(ec_groups);
-    std::println("get_ec_group_by_curves_name_expected {}", ec_groups.size());
-
-    if (not postulate_random_points_expected.has_value()) {
-      std::println("postulate_nonce_points_expected error {}",
-                   postulate_random_points_expected.error());
-      exit(1);
+    {
+      flatbuffers::FlatBufferBuilder builder;
+      auto setup_proving = zerauth::CreateProving(
+          builder, builder.CreateString(nonce_hex.value().c_str()),
+          builder.CreateString(challenge_hex.value().c_str()));
+      // Build the Sigma table
+      builder.Finish(setup_proving);  // ✅ sets root
+      debug_print_flatbuffer<zerauth::Proving>(
+          {builder.GetBufferPointer(), builder.GetSize()},
+          "flatb/proving_phase.fbs", {"flatb/"});
     }
 
-    auto const &&postulate_random_points =
-        std::move(postulate_random_points_expected.value());
-    std::println("postulate_nonce_points {}", postulate_random_points.size());
+    {
+      flatbuffers::FlatBufferBuilder builder;
+      auto &&nonce_hex = crypto::BIGNUM_to_hex(nonce);
+      auto &&transient_challenge_hex =
+          crypto::EC_POINTS_to_hex(ec_groups, transient_points);
 
-    auto const &&secret = crypto::hash_to_BIGNUM({"password"});
-    printBN("secret =  ", secret.get());
+      auto setup_transient = zerauth::CreateTransient(
+          builder,
 
-    auto &&commitment_expected =
-        crypto::generate_commitment(ec_groups, postulate_random_points, secret);
-
-    if (not commitment_expected.has_value()) {
-      std::println("commitments_expected error {}",
-                   commitment_expected.error());
-      exit(1);
-    }
-
-    auto const &&commitments = std::move(commitment_expected.value());
-    std::println("commitments {}", commitments.size());
-
-    // The Prover send to the verifer the postulate and the commitments (in
-    // enrolement process) The Verifier generate the transient chalenge and send
-    // it to the prover
-
-    // Alice ask bob to prove that she knows the password, so bob generate the
-    // transient chalenge (transient_points) based on the
-    // postulate_random_points placed on ther respective eliptic curve group and
-    // send the transient nonce to Alice
-    auto &&transient_chalenge_expected =
-        crypto::generate_transient_chalenge(ec_groups, postulate_random_points);
-
-    if (not transient_chalenge_expected.has_value()) {
-      std::println("transient_chalenge_expected error {}",
-                   transient_chalenge_expected.error());
-      exit(1);
-    }
-    auto const &&transient_chalenge =
-        std::move(transient_chalenge_expected.value());
-    auto &&[nonce, transient_points] = transient_chalenge;
-    std::println("transient_chalenge {}", transient_points.size());
-
-    auto challenge_expected =
-        crypto::generate_challenge(ec_groups, commitments, transient_points);
-
-    if (not challenge_expected.has_value()) {
-      std::println("challenge_expected error {}", challenge_expected.error());
-      exit(1);
-    }
-
-    // Bob also send the challenge generated from the commitment and the
-    // transient nonce to Alice
-    auto const &&challenge = std::move(challenge_expected.value());
-    std::println("commitments {}", commitments.size());
-    printBN("challenge ", challenge.get());
-
-    auto const &&response = crypto::solve_challenge(secret, nonce, challenge);
-    printBN("response ", response.get());
-
-    if (crypto::verify(ec_groups, postulate_random_points, commitments,
-                       transient_points, challenge, response)) {
-      std::println("Alice proved to Bob she knows the password");
-    } else {
-      std::println("Verification failed");
+          zerauth::CreateSetup(
+              builder, builder.CreateVectorOfStrings(curve_names),
+              builder.CreateVectorOfStrings(
+                  postulate_random_points_hex.value()),
+              builder.CreateVectorOfStrings(commitments_points_hex.value())),
+          zerauth::CreateProving(
+              builder, builder.CreateString(nonce_hex.value().c_str()),
+              builder.CreateString(challenge_hex.value().c_str())),
+          builder.CreateVectorOfStrings(transient_challenge_hex.value()));
+      // Build the Sigma table
+      builder.Finish(setup_transient);  // ✅ sets root
+      debug_print_flatbuffer<zerauth::Transient>(
+          {builder.GetBufferPointer(), builder.GetSize()},
+          "flatb/transient.fbs", {"flatb/"});
     }
   }
-  exit(0);
-  // Example data
-  std::vector<std::pair<std::string, std::string>> data = {
-      {"curve1", "coordinate1"},
-      {"curve2", "coordinate2"},
-      {"curve3", "coordinate3"}};
 
-  // std::vector<flatbuffers::Offset</* NIDLEQ:: */Point>> points_vec;
-  // for (const auto &item : data) {
-  //   auto curve_offset = builder.CreateString(item.first);
-  //   auto coordinate_offset = builder.CreateString(item.second);
+  // Alice execute and return the response
+  // Proving : nonce, challenge
+  auto const &&response = crypto::solve_challenge(secret, nonce, challenge);
+  printBN("response ", response.get());
 
-  //   /* NIDLEQ:: */PointBuilder point_builder(builder);
-  //   point_builder.add_curve(curve_offset);
-  //   point_builder.add_coordinate(coordinate_offset);
-  //   auto point_offset = point_builder.Finish();
-
-  //   points_vec.push_back(point_offset);
-  // }
-
-  // flatbuffers::Offset<
-  // flatbuffers::Vector<flatbuffers::Offset</* NIDLEQ:: */Point>>>
-  // coordinates{builder.};
-  // builder.Finish(/* NIDLEQ:: */CreatePostulate(builder,coordinates));
-  // Example usage
-  std::string secretKey =
-      "12345678901234567890";  // Replace with your base32 secret key
-  int digits = 6;              // Number of digits in the OTP
-  int timeStep = 30;           // Time step in seconds
-  std::string totp = generateTOTP(secretKey, digits, timeStep);
-  std::cout << "TOTP: " << totp << std::endl;
-
-  // exit(1);
-  std::tuple<EC_GROUP const *, EC_GROUP const *> const groups{
-      EC_GROUP_new_by_curve_name(OBJ_sn2nid("secp256k1")),
-      EC_GROUP_new_by_curve_name(OBJ_sn2nid("prime256v1")),
-      // EC_GROUP_new_by_curve_name(OBJ_sn2nid("prime239v1")),
-
-  };
-
-  auto const &[group_g, group_h]{groups};
-
-  // ========= Client ==========
-  //
-  // Generate random G and H and store it.
-  // Postulate
-  std::tuple<EC_POINT const *, EC_POINT const *> const postulate_random_points{
-      generate_random_point(group_g), generate_random_point(group_h)};
-
-  // auto const& [postulate_point_g, postulate_point_h]{
-  // postulate_random_points
-  // };
-
-  crypto::BN_unique_ptr const x_registered_secret =
-      crypto::hash_to_BIGNUM({"thesecret", "Data", totp});
-
-  // Generate xG and xH with the ephemeral x_secret (TOTP) and store xG, xH
-  // but not x_secret Commitment
-  auto const &[xg_scalar, xh_scalar]{generate_challenge_commitment(
-      groups, postulate_random_points, x_registered_secret.get())};
-
-  // Send Postulate and Commitment to the server
-
-  // ===================
-
-  // Generate v_commitment, vG, and vH for each proof verification, and store
-  // it for the time being
-  auto const &[v_commitment, vg_commitment, vh_commitment]{
-      generate_chalenge_from_commitment(groups, postulate_random_points)};
-
-  // challenge = H(xG, xH, vG, vH)
-  //===================
-  BIGNUM const *c_challenge = generate_challenge(groups, xg_scalar, xh_scalar,
-                                                 vg_commitment, vh_commitment);
-
-  //  Send c_challenge and the v_commitment
-  // ===================
-
-  crypto::BN_unique_ptr const x_input_secret =
-      crypto::hash_to_BIGNUM({"thesecret", "Data", totp});
-
-  // load c_challenge, v_commitment from db and send it to the user
-
-  // EC_POINT_point2hex();
-  // EC_POINT_hex2point();
-  // Response
-  // r = (v - (x * c))
-  BIGNUM const *r_response{
-      solve_challenge(x_input_secret.get(), c_challenge, v_commitment)};
-  // printBN("r_response ", r_response);
-
-  // r_response is the response to the challenge
-
-  std::cout << std::boolalpha
-            << Verify(groups,
-                      {c_challenge, r_response, vg_commitment, vh_commitment},
-                      postulate_random_points,  // v
-                      {xg_scalar, xh_scalar})
-            << std::endl;
+  // H(nonce, challenge) : Transient =   + Setup{curve_names,
+  // postulate_coordinates, commitment_coordinates} +
+  if (crypto::verify(ec_groups, postulate_random_points, commitments,
+                     transient_points, challenge, response)) {
+    std::println("Alice proved to Bob she knows the password");
+  } else {
+    std::println("Verification failed");
+  }
 
   return 0;
 }
-
-// flatc --cpp --gen-object-api --reflect-types --reflect-names
-// --gen-json-emit
-// --gen-mutable -I . -o datastructure commitment.fbs
-
-// A.0
-// Client define curve group parameter
-// ex, G1=prime256v1, G2=prime256v1 ... Gn
-// - Store the curves group parameter GP in DB
-// On theses curve generate N random points
-// - Store the curves point group parameter GP in DB
-// - And send it to the server
-// =========
-// Client hash his password to create a big number
-// - client initialize_challenge_commitment from the curves group parameter,
-// postulate_random_points received and the x_registered_secret computed from
-// secret
-// And send the server the v_commitment, Vg commitment for curves group
-// parameter the serve store the commitment for later create chanlenge so the
-// client can prove he still know

@@ -1,0 +1,8 @@
+namespace zerauth;
+
+table Proving {
+    nonce: string;
+    challenge: string;
+}
+
+root_type Proving;
