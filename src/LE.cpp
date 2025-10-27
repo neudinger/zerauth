@@ -22,7 +22,7 @@
 #include <openssl/sha.h>
 #include <openssl/types.h>
 
-#include <print>  // C++23 header for std::println
+#include <print>
 
 #include <cmath>
 #include <cstdint>
@@ -31,7 +31,6 @@
 #include <ctime>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -50,25 +49,38 @@ namespace crypto {
 #define EXPAND(x) x
 #define STRINGIFY(x) #x
 #define CONCAT(x, y) x##y
+#define ASSIGN_OR_UNEXPECTED_NAME(x, y) CONCAT(x, y)
 
 // Error handling macro
-#define OSSL_CHECK_NULL_OR_UNEXPECTED(ptr, msg)                     \
-  if ((ptr) == nullptr) {                                           \
-    return std::unexpected(                                         \
-        std::format("{} : {}", msg, ERR_error_string(0, nullptr))); \
+#define OSSL_CHECK_NULL_OR_UNEXPECTED(ptr, msg)                         \
+  if ((ptr) == nullptr) {                                               \
+    return std::unexpected(std::format("{} {} : {}", __FUNCTION__, msg, \
+                                       ERR_error_string(0, nullptr)));  \
   }
 
-#define OSSL_CHECK_OR_UNEXPECTED(good, msg)                         \
-  if (good not_eq 1) {                                              \
-    return std::unexpected(                                         \
-        std::format("{} : {}", msg, ERR_error_string(0, nullptr))); \
+#define OSSL_CHECK_OR_UNEXPECTED(good, msg)                             \
+  if (good not_eq 1) {                                                  \
+    return std::unexpected(std::format("{} {} : {}", __FUNCTION__, msg, \
+                                       ERR_error_string(0, nullptr)));  \
   }
 
-#define ASSIGN_OR_UNEXPECTED_NAME(x, y) CONCAT(x, y)
+#define ASSIGN_OR_UNEXPECTED_IMPL(result_name, definition, expression) \
+  auto &&result_name = (expression);                                   \
+  if (not(result_name.has_value())) [[likely]] {                       \
+    return std::unexpected(                                            \
+        std::format("{}: {}", __FUNCTION__, result_name.error()));     \
+  }                                                                    \
+  definition = std::move(result_name.value());
+#define ASSIGN_OR_UNEXPECTED(definition, expression)                        \
+  ASSIGN_OR_UNEXPECTED_IMPL(                                                \
+      ASSIGN_OR_UNEXPECTED_NAME(_error_or_value_, __COUNTER__), definition, \
+      expression)
+
 #define OSSL_ASSIGN_OR_UNEXPECTED_IMPL(result_name, definition, expression) \
   auto &&result_name = (expression);                                        \
   if (not(result_name.has_value())) [[likely]] {                            \
-    return std::unexpected(std::format("{} : {}", result_name.error(),      \
+    return std::unexpected(std::format("{} {} : {}", __FUNCTION__,          \
+                                       result_name.error(),                 \
                                        ERR_error_string(0, nullptr)));      \
   }                                                                         \
   definition = std::move(result_name.value());
@@ -89,10 +101,6 @@ namespace crypto {
   ASSIGN_OR_EXIT_IMPL(                                                      \
       ASSIGN_OR_UNEXPECTED_NAME(_error_or_value_, __COUNTER__), definition, \
       expression)
-
-using namespace std::literals;
-using namespace std::string_literals;
-using namespace std::string_view_literals;
 
 using char_unique_ptr = typename std::unique_ptr<char, decltype(&::free)>;
 using buf_unique_ptr = typename std::unique_ptr<uint8_t, decltype(&::free)>;
@@ -124,6 +132,11 @@ concept Integral = std::is_integral_v<T>;
 template <typename TYPE>
 concept StringLike = std::is_convertible_v<TYPE, std::string>;
 
+template <typename VerifierType>
+concept VerifierRequest = std::same_as<VerifierType, zerauth::Setup> or
+                          std::same_as<VerifierType, zerauth::Proving> or
+                          std::same_as<VerifierType, zerauth::Transient>;
+
 auto get_ec_group_by_curves_name(std::vector<std::string> const &curves_name)
     -> std::expected<std::vector<EC_GROUP_unique_ptr>, std::string> {
   std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
@@ -150,7 +163,7 @@ auto BIGNUM_to_dec(BN_unique_ptr const &bignumber)
                                            crypto::crypto_char_free};
 
   OSSL_CHECK_NULL_OR_UNEXPECTED(
-      num_dec_str, "Cannot convert BIG NUMBER to decimal string : "sv)
+      num_dec_str, "Cannot convert BIG NUMBER to decimal string : ")
 
   return std::string{num_dec_str.get(), std::strlen(num_dec_str.get())};
 }
@@ -171,31 +184,28 @@ auto BIGNUM_to_hex(BN_unique_ptr const &bignumber)
   CRYPTO_char_unique_ptr const num_hex_str{BN_bn2hex(bignumber.get()),
                                            crypto::crypto_char_free};
   OSSL_CHECK_NULL_OR_UNEXPECTED(num_hex_str,
-                                "Cannot convert BIG NUMBER to hexa string : "sv)
+                                "Cannot convert BIG NUMBER to hexa string : ")
 
   return std::string{num_hex_str.get(), std::strlen(num_hex_str.get())};
 }
 
-auto EC_POINT_to_hex(std::tuple<EC_GROUP_unique_ptr const &,
-                                EC_POINT_unique_ptr const &> &&group_point)
+auto EC_POINT_to_hex(EC_GROUP_unique_ptr const &group,
+                     EC_POINT_unique_ptr const &point)
     -> std::expected<std::string, std::string> {
-  auto const &[group, point]{group_point};
-
   CRYPTO_char_unique_ptr const point_position_hex_str{
       EC_POINT_point2hex(group.get(), point.get(), POINT_CONVERSION_COMPRESSED,
                          nullptr),
       crypto::crypto_char_free};
   OSSL_CHECK_NULL_OR_UNEXPECTED(point_position_hex_str,
-                                "Cannot convert EC_POINT to hexa string : "sv)
+                                "Cannot convert EC_POINT to hexa string : ")
 
   return std::string{point_position_hex_str.get(),
                      std::strlen(point_position_hex_str.get())};
 }
 
-auto hex_to_EC_POINT(
-    std::tuple<EC_GROUP_unique_ptr const &, std::string const &> &&group_point)
+auto hex_to_EC_POINT(EC_GROUP_unique_ptr const &group,
+                     std::string const &point_hex)
     -> std::expected<EC_POINT_unique_ptr, std::string> {
-  auto const &[group, point_hex]{group_point};
   EC_POINT_unique_ptr point_ec{EC_POINT_new(group.get()), ::EC_POINT_free};
 
   OSSL_CHECK_NULL_OR_UNEXPECTED(
@@ -215,11 +225,10 @@ auto EC_POINTS_to_hex(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
   std::vector<std::string> point_hex;
   point_hex.reserve(ec_groups.size());
 
-  for (auto const &[group, point] :
+  for (auto const &[ec_group, ec_point] :
        std::ranges::views::zip(ec_groups, ec_points)) {
-    OSSL_ASSIGN_OR_UNEXPECTED(
-        auto &&ec_point_to_hex,
-        EC_POINT_to_hex(std::forward_as_tuple(group, point)))
+    OSSL_ASSIGN_OR_UNEXPECTED(auto ec_point_to_hex,
+                              EC_POINT_to_hex(ec_group, ec_point))
     point_hex.push_back(std::move(ec_point_to_hex));
   }
 
@@ -266,29 +275,29 @@ auto generate_random_group_scalar(EC_GROUP_unique_ptr const &group)
   BN_unique_ptr const order{BN_unique_ptr(BN_new(), ::BN_free)};
   BN_unique_ptr random_scalar{BN_unique_ptr(BN_new(), ::BN_free)};
 
-  OSSL_CHECK_NULL_OR_UNEXPECTED(order, "Cannot allocate order : "sv)
+  OSSL_CHECK_NULL_OR_UNEXPECTED(order, "Cannot allocate order : ")
   OSSL_CHECK_NULL_OR_UNEXPECTED(random_scalar,
-                                "Cannot allocate random_scalar : "sv)
+                                "Cannot allocate random_scalar : ")
 
   OSSL_CHECK_OR_UNEXPECTED(
       EC_GROUP_get_order(group.get(), order.get(), nullptr),
-      "Cannot get group order : "sv);
+      "Cannot get group order : ");
   OSSL_CHECK_OR_UNEXPECTED(BN_rand_range(random_scalar.get(), order.get()),
-                           "Cannot get random scalar : "sv);
+                           "Cannot get random scalar : ");
   return random_scalar;
 }
 
 auto generate_random_point(EC_GROUP_unique_ptr const &group)
     -> std::expected<EC_POINT_unique_ptr, std::string> {
   BN_CTX_unique_ptr const ctx{BN_CTX_new(), ::BN_CTX_free};
-  OSSL_CHECK_NULL_OR_UNEXPECTED(ctx, "Cannot create a BIG NUMBER Context : "sv)
+  OSSL_CHECK_NULL_OR_UNEXPECTED(ctx, "Cannot create a BIG NUMBER Context : ")
 
   EC_POINT const *const generator = EC_GROUP_get0_generator(group.get());
-  OSSL_CHECK_NULL_OR_UNEXPECTED(generator, "Cannot get the generator : "sv)
+  OSSL_CHECK_NULL_OR_UNEXPECTED(generator, "Cannot get the generator : ")
 
   EC_POINT_unique_ptr point{EC_POINT_dup(generator, group.get()),
                             ::EC_POINT_free};
-  OSSL_CHECK_NULL_OR_UNEXPECTED(point, "Cannot allocate a point : "sv)
+  OSSL_CHECK_NULL_OR_UNEXPECTED(point, "Cannot allocate a point : ")
 
   std::expected<BN_unique_ptr const, std::string> const expected_random_scalar{
       generate_random_group_scalar(group)};
@@ -297,15 +306,14 @@ auto generate_random_point(EC_GROUP_unique_ptr const &group)
   }
   auto &&random_scalar = std::move(expected_random_scalar.value());
   BIGNUM const *const order{EC_GROUP_get0_order(group.get())};
-  OSSL_CHECK_NULL_OR_UNEXPECTED(order,
-                                "Cannot get order of the curent group "sv)
+  OSSL_CHECK_NULL_OR_UNEXPECTED(order, "Cannot get order of the curent group ")
   OSSL_CHECK_OR_UNEXPECTED(BN_div(nullptr, random_scalar.get(),
                                   random_scalar.get(), order, ctx.get()),
-                           "Cannot process div operation : "sv);
+                           "Cannot process div operation : ");
   OSSL_CHECK_OR_UNEXPECTED(
       EC_POINT_mul(group.get(), point.get(), nullptr, point.get(),
                    random_scalar.get(), nullptr),
-      "Cannot process mult operation :"sv);
+      "Cannot process mult operation :");
   return point;
 }
 
@@ -372,7 +380,7 @@ auto generate_commitment(
     OSSL_CHECK_OR_UNEXPECTED(
         EC_POINT_mul(group.get(), curve_point.get(), nullptr,
                      postulate_random_point.get(), secret.get(), nullptr),
-        "Cannot process mult operation :"sv);
+        "Cannot process mult operation :");
     commitments.emplace_back(std::move(curve_point));
   }
   return commitments;
@@ -529,9 +537,14 @@ auto verify(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
       case -1: {
         return std::unexpected("verify EC_POINT_cmp error ");
       }
-      case 0: {
+      // 1 if the points are not equal
+      case 1: {
         return false;
       }
+      // 0 if the points are equal
+      case 0:
+        break;
+
       default:
         break;
     }
@@ -541,72 +554,136 @@ auto verify(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
 
 }  // namespace crypto
 
-template <typename VerifierType>
-auto debug_print_flatbuffer(std::span<const uint8_t> const &buffer,
-                            std::string const &schema_file,
-                            std::vector<std::string> const &include_dir = {}) {
-  // Load the schema file
-  std::string schemafile;
+template <crypto::VerifierRequest VerifierType>
+auto flatbuffer_to_json(std::span<uint8_t const> const &buffer,
+                        std::string const &schema_file_name,
+                        std::vector<std::string> const &include_dirs = {})
+    -> std::expected<std::string, std::string> {
+  std::string schema_file;
 
-  std::vector<const char *> include_pointers;
-  include_pointers.reserve(include_dir.size());
-  for (const auto &str : include_dir) {
-    include_pointers.push_back(str.c_str());
-  }
-  const char **paths_for_func = include_pointers.data();
-
-  if (!flatbuffers::LoadFile(schema_file.c_str(), false, &schemafile)) {
-    std::println("Failed to load schema file {}", schema_file);
-    return;
+  if (!flatbuffers::LoadFile(schema_file_name.c_str(), false, &schema_file)) {
+    return std::unexpected(
+        std::format("Failed to load schema file {}", schema_file_name));
   }
   flatbuffers::Parser parser;
   parser.opts.indent_step = 2;  // pretty JSON
-
-  if (!parser.Parse(schemafile.c_str(), paths_for_func)) {
-    std::println("Schema parse failed: -- {}", schemafile);
-    return;
-  }
-
-  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
-
-  if constexpr (std::same_as<VerifierType, zerauth::Setup>) {
-    if (!zerauth::VerifySetupBuffer(verifier)) {
-      std::println("VerifySetupBuffer verification failed");
-      return;
-    }
-  } else if (std::same_as<VerifierType, zerauth::Proving>) {
-    if (!zerauth::VerifyProvingBuffer(verifier)) {
-      std::println("VerifyProvingBuffer verification failed");
-      return;
-    }
-  } else if (std::same_as<VerifierType, zerauth::Transient>) {
-    if (!zerauth::VerifyTransientBuffer(verifier)) {
-      std::println("VerifyTransientBuffer verification failed");
-      return;
-    }
-  } else {
-    std::println("Buffer verification failed");
-    return;
+  char const **paths_view = (char const **)(include_dirs.data());
+  if (!parser.Parse(schema_file.c_str(), paths_view)) {
+    return std::unexpected(
+        std::format("Schema parse failed: -- {}", schema_file));
   }
 
   if (parser.root_struct_def_ == nullptr) {
-    std::println("No root type defined in schema");
-    return;
+    return std::unexpected(std::format("No root type defined in schema"));
   }
 
-  std::println("Root type: {}", parser.root_struct_def_->name);
+  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
+  if constexpr (std::same_as<VerifierType, zerauth::Setup>) {
+    if (!zerauth::VerifySetupBuffer(verifier)) {
+      return std::unexpected(
+          std::format("VerifySetupBuffer verification failed"));
+    }
+  } else if (std::same_as<VerifierType, zerauth::Proving>) {
+    if (!zerauth::VerifyProvingBuffer(verifier)) {
+      return std::unexpected(
+          std::format("VerifyProvingBuffer verification failed"));
+    }
+  } else if (std::same_as<VerifierType, zerauth::Transient>) {
+    if (!zerauth::VerifyTransientBuffer(verifier)) {
+      return std::unexpected(
+          std::format("VerifyTransientBuffer verification failed"));
+    }
+  } else {
+    return std::unexpected(std::format("Buffer verification failed"));
+  }
 
   std::string json;
   auto const *const err =
       flatbuffers::GenerateText(parser, buffer.data(), &json);
 
   if (err not_eq nullptr) {
-    std::println("Failed to generate JSON {}", err);
-    return;
+    return std::unexpected(std::format("Failed to generate JSON {}", err));
   }
-  std::println("json gen : {}", json);
+  return json;
 }
 
+[[nodiscard]]
+auto flat_buffer_build_transient_builder(
+    std::vector<std::string> const &curve_names,
+    std::vector<std::string> const &postulate_random_points_hex,
+    std::vector<std::string> const &commitments_points_hex,
+    std::string const &nonce_hex, std::string const &challenge_hex,
+    std::vector<std::string> const &transient_challenge_hex) noexcept
+    -> flatbuffers::FlatBufferBuilder {
+  flatbuffers::FlatBufferBuilder builder;
+  builder.Finish(zerauth::CreateTransient(
+      builder,
+      zerauth::CreateSetup(
+          builder, builder.CreateVectorOfStrings(curve_names),
+          builder.CreateVectorOfStrings(postulate_random_points_hex),
+          builder.CreateVectorOfStrings(commitments_points_hex)),
+      zerauth::CreateProving(builder, builder.CreateString(nonce_hex.c_str()),
+                             builder.CreateString(challenge_hex.c_str())),
+      builder.CreateVectorOfStrings(transient_challenge_hex)));
+  return builder;
+}
+
+[[nodiscard]]
+auto flat_buffer_build_setup_builder(
+    std::vector<std::string> const &curve_names_selected,
+    std::vector<std::string> const &postulate_random_points_hex,
+    std::vector<std::string> const &commitments_points_hex) noexcept
+    -> flatbuffers::FlatBufferBuilder {
+  flatbuffers::FlatBufferBuilder builder;
+  builder.Finish(zerauth::CreateSetup(
+      builder, builder.CreateVectorOfStrings(curve_names_selected),
+      builder.CreateVectorOfStrings(postulate_random_points_hex),
+      builder.CreateVectorOfStrings(commitments_points_hex)));
+
+  return builder;
+}
+
+[[nodiscard]]
+auto flat_buffer_build_proving_builder(
+    std::string const &nonce_hex, std::string const &challenge_hex) noexcept
+    -> flatbuffers::FlatBufferBuilder {
+  flatbuffers::FlatBufferBuilder builder;
+  builder.Finish(
+      zerauth::CreateProving(builder, builder.CreateString(nonce_hex.c_str()),
+                             builder.CreateString(challenge_hex.c_str())));
+  return builder;
+}
+
+[[nodiscard]]
+auto list_curve_name() noexcept
+    -> std::expected<std::vector<std::string>, std::string> {
+  std::vector<std::string> curve_names;
+
+  size_t const curve_name_len = EC_get_builtin_curves(nullptr, 0);
+
+  if (curve_name_len == 0) {
+    return std::unexpected("No built-in elliptic curves found.");
+  }
+
+  curve_names.reserve(curve_name_len);
+  std::vector<EC_builtin_curve> raw_curves(curve_name_len);
+
+  if (EC_get_builtin_curves(raw_curves.data(), curve_name_len) not_eq
+      curve_name_len) {
+    return std::unexpected("Failed to retrieve built-in curves.");
+  }
+
+  for (auto const &curve : raw_curves) {
+    auto const nid = curve.nid;
+    std::string const long_name(OBJ_nid2ln(nid));
+
+    if (not long_name.empty()) {
+      curve_names.emplace_back(long_name);
+    }
+  }
+
+  return curve_names;
+}
 //
 //  openssl ecparam
 // -list_curves
@@ -628,11 +705,91 @@ auto main(int argc, const char **argv) -> int {
   // Sample data
   // Statement
   //  openssl ecparam -list_curves
-  std::vector<std::string> curve_names = {
-      "secp256k1", "prime256v1", "wap-wsg-idm-ecid-wtls6", "c2pnb304w1"};
+  // std::vector<std::string> curve_names = {
+  // "secp256k1", "prime256v1", "wap-wsg-idm-ecid-wtls6", "c2pnb304w1"};
+
+  std::vector<std::string> curve_names_selected = {"secp112r1",
+                                                   "secp112r2",
+/*                                                    "secp128r1",
+                                                   "secp128r2",
+                                                   "secp160k1",
+                                                   "secp160r1",
+                                                   "secp160r2",
+                                                   "secp192k1",
+                                                   "secp224k1",
+                                                   "secp224r1",
+                                                   "secp256k1",
+                                                   "secp384r1",
+                                                   "secp521r1",
+                                                   "prime192v1",
+                                                   "prime192v2",
+                                                   "prime192v3",
+                                                   "prime239v1",
+                                                   "prime239v2",
+                                                   "prime239v3",
+                                                   "prime256v1",
+                                                   "sect113r1",
+                                                   "sect113r2",
+                                                   "sect131r1",
+                                                   "sect131r2",
+                                                   "sect163k1",
+                                                   "sect163r1",
+                                                   "sect163r2",
+                                                   "sect193r1",
+                                                   "sect193r2",
+                                                   "sect233k1",
+                                                   "sect233r1",
+                                                   "sect239k1",
+                                                   "sect283k1",
+                                                   "sect283r1",
+                                                   "sect409k1",
+                                                   "sect409r1",
+                                                   "sect571k1",
+                                                   "sect571r1",
+                                                   "c2pnb163v1",
+                                                   "c2pnb163v2",
+                                                   "c2pnb163v3",
+                                                   "c2pnb176v1",
+                                                   "c2tnb191v1",
+                                                   "c2tnb191v2",
+                                                   "c2tnb191v3",
+                                                   "c2pnb208w1",
+                                                   "c2tnb239v1",
+                                                   "c2tnb239v2",
+                                                   "c2tnb239v3",
+                                                   "c2pnb272w1",
+                                                   "c2pnb304w1",
+                                                   "c2tnb359v1",
+                                                   "c2pnb368w1",
+                                                   "c2tnb431r1",
+                                                   "wap-wsg-idm-ecid-wtls1",
+                                                   "wap-wsg-idm-ecid-wtls3",
+                                                   "wap-wsg-idm-ecid-wtls4",
+                                                   "wap-wsg-idm-ecid-wtls5",
+                                                   "wap-wsg-idm-ecid-wtls6",
+                                                   "wap-wsg-idm-ecid-wtls7",
+                                                   "wap-wsg-idm-ecid-wtls8",
+                                                   "wap-wsg-idm-ecid-wtls9",
+                                                   "wap-wsg-idm-ecid-wtls10",
+                                                   "wap-wsg-idm-ecid-wtls11",
+                                                   "wap-wsg-idm-ecid-wtls12",
+                                                   "brainpoolP160r1",
+                                                   "brainpoolP160t1",
+                                                   "brainpoolP192r1",
+                                                   "brainpoolP192t1",
+                                                   "brainpoolP224r1",
+                                                   "brainpoolP224t1",
+                                                   "brainpoolP256r1",
+                                                   "brainpoolP256t1",
+                                                   "brainpoolP320r1",
+                                                   "brainpoolP320t1",
+                                                   "brainpoolP384r1",
+                                                   "brainpoolP384t1",
+                                                   "brainpoolP512r1",
+                                                   "brainpoolP512t1" */};
 
   ASSIGN_OR_EXIT(auto const ec_groups,
-                 crypto::get_ec_group_by_curves_name(curve_names));
+                 crypto::get_ec_group_by_curves_name(curve_names_selected));
 
   ASSIGN_OR_EXIT(auto const postulate_random_points,
                  crypto::generate_random_points_from(ec_groups));
@@ -643,25 +800,20 @@ auto main(int argc, const char **argv) -> int {
       auto const commitments,
       crypto::generate_commitment(ec_groups, postulate_random_points, secret))
 
-  std::println("commitments {}", commitments.size());
-
   ASSIGN_OR_EXIT(auto const postulate_random_points_hex,
                  crypto::EC_POINTS_to_hex(ec_groups, postulate_random_points))
 
   ASSIGN_OR_EXIT(auto const commitments_points_hex,
                  crypto::EC_POINTS_to_hex(ec_groups, commitments))
 
-  {
-    flatbuffers::FlatBufferBuilder builder;
-    // Build the Setup table
-    builder.Finish(zerauth::CreateSetup(
-        builder, builder.CreateVectorOfStrings(curve_names),
-        builder.CreateVectorOfStrings(postulate_random_points_hex),
-        builder.CreateVectorOfStrings(commitments_points_hex)));
-    debug_print_flatbuffer<zerauth::Setup>(
-        {builder.GetBufferPointer(), builder.GetSize()},
-        "flatb/setup_phase.fbs", {"flatb/"});
-  }
+  auto const builder_setup = flat_buffer_build_setup_builder(
+      curve_names_selected, postulate_random_points_hex,
+      commitments_points_hex);
+  auto const json_setup = flatbuffer_to_json<zerauth::Setup>(
+      {builder_setup.GetBufferPointer(), builder_setup.GetSize()},
+      "flatb/setup_phase.fbs", {"flatb/"});
+  std::println("--- json_setup ---\n{}",
+               json_setup.value_or(json_setup.error()));
 
   // The Prover send to the verifer the postulate and the commitments (in
   // enrolement process) The Verifier generate the transient challenge and
@@ -676,7 +828,6 @@ auto main(int argc, const char **argv) -> int {
       auto const transient_challenge,
       crypto::generate_transient_challenge(ec_groups, postulate_random_points))
   auto &&[nonce, transient_points] = transient_challenge;
-  std::println("transient_challenge {}", transient_points.size());
 
   // Bob also send the challenge generated from the commitment and the
   // transient nonce to Alice
@@ -684,45 +835,31 @@ auto main(int argc, const char **argv) -> int {
       auto const challenge,
       crypto::generate_challenge(ec_groups, commitments, transient_points))
 
-  {
-    ASSIGN_OR_EXIT(auto const nonce_hex, crypto::BIGNUM_to_hex(nonce))
-    ASSIGN_OR_EXIT(auto const challenge_hex, crypto::BIGNUM_to_hex(challenge))
+  ASSIGN_OR_EXIT(auto const nonce_hex, crypto::BIGNUM_to_hex(nonce))
+  ASSIGN_OR_EXIT(auto const challenge_hex, crypto::BIGNUM_to_hex(challenge))
 
-    flatbuffers::FlatBufferBuilder builder_proving;
-    auto proving_offset = zerauth::CreateProving(
-        builder_proving, builder_proving.CreateString(nonce_hex.c_str()),
-        builder_proving.CreateString(challenge_hex.c_str()));
-    // Build the Sigma table
-    builder_proving.Finish(proving_offset);
-    debug_print_flatbuffer<zerauth::Proving>(
-        {builder_proving.GetBufferPointer(), builder_proving.GetSize()},
-        "flatb/proving_phase.fbs", {"flatb/"});
+  auto const builder_proving =
+      flat_buffer_build_proving_builder(nonce_hex, challenge_hex);
 
-    // auto const *const proving_ptr = flatbuffers::GetRoot<zerauth::Proving>(
-    // builder_proving.GetBufferPointer());
+  auto const json_proving = flatbuffer_to_json<zerauth::Proving>(
+      {builder_proving.GetBufferPointer(), builder_proving.GetSize()},
+      "flatb/proving_phase.fbs", {"flatb/"});
 
-    // auto unpacked = proving_ptr->UnPack();
+  std::println("--- json_proving ---\n{}",
+               json_proving.value_or(json_proving.error()));
 
-    flatbuffers::FlatBufferBuilder builder_transient;
+  ASSIGN_OR_EXIT(auto const transient_challenge_hex,
+                 crypto::EC_POINTS_to_hex(ec_groups, transient_points))
 
-    ASSIGN_OR_EXIT(auto const transient_challenge_hex,
-                   crypto::EC_POINTS_to_hex(ec_groups, transient_points))
+  auto const builder_transient = flat_buffer_build_transient_builder(
+      curve_names_selected, postulate_random_points_hex, commitments_points_hex,
+      nonce_hex, challenge_hex, transient_challenge_hex);
+  auto const json_transient = flatbuffer_to_json<zerauth::Transient>(
+      {builder_transient.GetBufferPointer(), builder_transient.GetSize()},
+      "flatb/transient.fbs", {"flatb/"});
 
-    // Build the Sigma table
-    builder_transient.Finish(zerauth::CreateTransient(
-        builder_transient,
-        zerauth::CreateSetup(
-            builder_transient,
-            builder_transient.CreateVectorOfStrings(curve_names),
-            builder_transient.CreateVectorOfStrings(
-                postulate_random_points_hex),
-            builder_transient.CreateVectorOfStrings(commitments_points_hex)),
-        proving_offset,
-        builder_transient.CreateVectorOfStrings(transient_challenge_hex)));
-    debug_print_flatbuffer<zerauth::Transient>(
-        {builder_transient.GetBufferPointer(), builder_transient.GetSize()},
-        "flatb/transient.fbs", {"flatb/"});
-  }
+  std::println("--- json_transient ---\n{}",
+               json_transient.value_or(json_transient.error()));
 
   // Alice execute and return the response
   // Proving : nonce, challenge
