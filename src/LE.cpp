@@ -974,8 +974,7 @@ auto flat_buffer_build_transient_builder(
           builder.CreateVectorOfStrings(commitments_points_hex),
           builder.CreateString(salt)),
       zerauth::CreateProving(builder, builder.CreateString(nonce_hex.c_str()),
-                             builder.CreateString(challenge_hex.c_str()),
-                             builder.CreateString(salt)),
+                             builder.CreateString(challenge_hex.c_str())),
       builder.CreateVectorOfStrings(transient_challenge_hex)));
   return builder;
 }
@@ -1269,11 +1268,11 @@ auto main(int argc, const char **argv) -> int {
 
 #pragma region Setup Enrolement Step
 
-  auto const salt = crypto::generate_random_string(5);
+  auto const salt = crypto::generate_random_string(8);
 
   ASSIGN_OR_EXIT(
       auto const buffer_setup_b64,
-      create_commitment_setup("password", random_curves_selections(3), salt));
+      create_commitment_setup("password", random_curves_selections(1), salt));
   // The Prover send to the verifer the postulate and the commitments (in
   // enrolement process) The Verifier generate the transient challenge and
   // send it to the prover
