@@ -30,11 +30,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <iterator>
 #include <memory>
 #include <random>
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <array>
@@ -158,6 +160,94 @@ concept VerifierRequest = std::same_as<VerifierType, zerauth::Setup> or
                           std::same_as<VerifierType, zerauth::Proving> or
                           std::same_as<VerifierType, zerauth::Transient>;
 
+template <crypto::VerifierRequest VerifierType>
+struct [[nodiscard]] VerifyBuffer_impl;
+
+#define DECLARE_VERIFY_BUFFER_IMPL(Type)                                       \
+  template <>                                                                  \
+  struct [[nodiscard]] VerifyBuffer_impl<zerauth::Type> {                      \
+    static constexpr auto _(flatbuffers::Verifier verifier) noexcept -> bool { \
+      return zerauth::Verify##Type##Buffer(verifier);                          \
+    }                                                                          \
+  };
+
+DECLARE_VERIFY_BUFFER_IMPL(Setup)
+DECLARE_VERIFY_BUFFER_IMPL(Proving)
+DECLARE_VERIFY_BUFFER_IMPL(Transient)
+#undef DECLARE_VERIFY_BUFFER_IMPL
+
+template <crypto::VerifierRequest VerifierType>
+[[nodiscard]] auto VerifyBuffer(flatbuffers::Verifier verifier) noexcept
+    -> bool {
+  return VerifyBuffer_impl<VerifierType>::_(verifier);
+}
+
+template bool VerifyBuffer<zerauth::Setup>(flatbuffers::Verifier);
+template bool VerifyBuffer<zerauth::Proving>(flatbuffers::Verifier);
+template bool VerifyBuffer<zerauth::Transient>(flatbuffers::Verifier);
+
+template <crypto::VerifierRequest VerifierType>
+[[nodiscard]] auto flatbuffer_to_struct(std::span<uint8_t const> const &buffer)
+    -> std::expected<
+        std::invoke_result_t<decltype(&flatbuffers::GetRoot<VerifierType>),
+                             void const *>,
+        std::string> {
+  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
+
+  UNEXPECTED_IF(not VerifyBuffer<VerifierType>(verifier),
+                "VerifyBuffer verification failed")
+
+  return flatbuffers::GetRoot<VerifierType>(buffer.data());
+}
+
+#define INSTANTIATE_FLATBUFFER_TO_STRUCT(Type)                             \
+  template std::expected<                                                  \
+      std::invoke_result_t<decltype(&flatbuffers::GetRoot<zerauth::Type>), \
+                           void const *>,                                  \
+      std::string>                                                         \
+  flatbuffer_to_struct<zerauth::Type>(std::span<uint8_t const> const &);
+
+INSTANTIATE_FLATBUFFER_TO_STRUCT(Setup)
+INSTANTIATE_FLATBUFFER_TO_STRUCT(Proving)
+INSTANTIATE_FLATBUFFER_TO_STRUCT(Transient)
+
+#undef INSTANTIATE_FLATBUFFER_TO_STRUCT
+
+template <crypto::VerifierRequest VerifierType>
+[[nodiscard]] auto flatbuffer_to_json(
+    std::span<uint8_t const> const &buffer, std::string const &schema_file_name,
+    std::vector<std::string> const &include_dirs = {})
+    -> std::expected<std::string, std::string> {
+  std::string schema_file;
+
+  UNEXPECTED_IF(
+      not flatbuffers::LoadFile(schema_file_name.c_str(), false, &schema_file),
+      std::format("Failed to load schema file {}", schema_file_name))
+
+  flatbuffers::Parser parser;
+  parser.opts.indent_step = 2;  // pretty JSON
+  char const **paths_view = (char const **)(include_dirs.data());
+
+  UNEXPECTED_IF(not parser.Parse(schema_file.c_str(), paths_view),
+                std::format("Schema parse failed: -- {}", schema_file))
+  UNEXPECTED_IF(parser.root_struct_def_ == nullptr,
+                "No root type defined in schema")
+
+  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
+
+  UNEXPECTED_IF(not VerifyBuffer<VerifierType>(verifier),
+                "VerifyBuffer verification failed")
+
+  std::string json;
+  auto const *const err =
+      flatbuffers::GenerateText(parser, buffer.data(), &json);
+
+  UNEXPECTED_IF(err not_eq nullptr,
+                std::format("Failed to generate JSON {}", err))
+
+  return json;
+}
+
 [[nodiscard]]
 auto generate_random_string(std::size_t const length) noexcept -> std::string {
   std::string_view constexpr char_pool =
@@ -183,6 +273,71 @@ auto generate_random_string(std::size_t const length) noexcept -> std::string {
 
   std::generate_n(std::back_inserter(random_string), length, generator);
   return random_string;
+}
+
+auto hex_to_BIGNUM(std::string const &hex_big_num)
+    -> std::expected<BN_unique_ptr, std::string> {
+  BN_unique_ptr big_number(BN_unique_ptr(BN_new(), ::BN_free));
+
+  BIGNUM *ptr = big_number.get();
+  OSSL_CHECK_OR_UNEXPECTED(BN_hex2bn(&ptr, hex_big_num.c_str()) not_eq 0,
+                           "Cannot convert hexa string to BIG NUMBER");
+
+  return big_number;
+}
+
+auto hex_to_EC_POINT(EC_GROUP_unique_ptr const &group,
+                     std::string const &point_hex)
+    -> std::expected<EC_POINT_unique_ptr, std::string> {
+  EC_POINT_unique_ptr point_ec{EC_POINT_new(group.get()), ::EC_POINT_free};
+
+  OSSL_CHECK_NULL_OR_UNEXPECTED(
+      EC_POINT_hex2point(group.get(), point_hex.c_str(), point_ec.get(),
+                         nullptr),
+      "Cannot convert hexa string to EC_POINT ");
+
+  return point_ec;
+}
+
+auto get_ec_group_by_curves_name(std::string const &curve_name)
+    -> std::expected<EC_GROUP_unique_ptr, std::string> {
+  auto const curve_nid = OBJ_sn2nid(curve_name.c_str());
+  UNEXPECTED_IF(curve_nid == NID_undef,
+                std::format("Can not find the nid of ({})", curve_name))
+  EC_GROUP_unique_ptr ec_group_unique_ptr{EC_GROUP_new_by_curve_name(curve_nid),
+                                          ::EC_GROUP_free};
+  OSSL_CHECK_NULL_OR_UNEXPECTED(
+      ec_group_unique_ptr,
+      std::format("Can not create group for the nid : ({}) : ", curve_nid));
+  return ec_group_unique_ptr;
+}
+
+auto get_ec_groups_by_curves_names(std::vector<std::string> const &curves_name)
+    -> std::expected<std::vector<EC_GROUP_unique_ptr>, std::string> {
+  std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
+  ec_group_by_curves_name.reserve(curves_name.size());
+  for (auto const &curve_name : curves_name) {
+    ASSIGN_OR_UNEXPECTED(auto ec_group_unique_ptr,
+                         get_ec_group_by_curves_name(curve_name));
+    ec_group_by_curves_name.emplace_back(std::move(ec_group_unique_ptr));
+  }
+  return ec_group_by_curves_name;
+}
+
+auto get_ec_groups_by_curves_names(
+    flatbuffers::Vector<
+        ::flatbuffers::Offset<::flatbuffers::String>> const *const curves_name)
+    -> std::expected<std::vector<EC_GROUP_unique_ptr>, std::string> {
+  std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
+  UNEXPECTED_IF(curves_name == nullptr or curves_name->empty(),
+                "curves_name is null or empty")
+  ec_group_by_curves_name.reserve(curves_name->size());
+  for (auto const *const curve_name : *curves_name) {
+    ASSIGN_OR_UNEXPECTED(auto ec_group_unique_ptr,
+                         get_ec_group_by_curves_name(curve_name->str()));
+    ec_group_by_curves_name.emplace_back(std::move(ec_group_unique_ptr));
+  }
+  return ec_group_by_curves_name;
 }
 
 [[nodiscard("Must use base64Decode return value")]]
@@ -248,37 +403,102 @@ auto base64Encode(std::span<uint8_t const> const &input) noexcept
   return outbuffer;
 }
 
-template <IsStringContainer RequestType>
-[[nodiscard]]
-auto convert_to(
-    flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
-        flat_buffers_vector) noexcept -> RequestType {
-  RequestType container;
-  if (flat_buffers_vector not_eq nullptr and not flat_buffers_vector->empty()) {
-    container.reserve(flat_buffers_vector->size());
-    for (auto const *const element : *flat_buffers_vector) {
-      container.emplace_back(element->str());
+template <typename DestType>
+struct [[nodiscard]] convert_to_impl;
+
+template <>
+struct [[nodiscard]] convert_to_impl<std::vector<std::string>> {
+  static constexpr auto _(
+      flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
+          flat_buffers_vector) noexcept
+      -> std::expected<std::vector<std::string>, std::string> {
+    std::vector<std::string> container;
+    if (flat_buffers_vector not_eq nullptr and
+        not flat_buffers_vector->empty()) {
+      container.reserve(flat_buffers_vector->size());
+      for (auto const *const element : *flat_buffers_vector) {
+        container.emplace_back(element->str());
+      }
     }
+    return container;
   }
-  return container;
+};
+
+template <>
+struct [[nodiscard]] convert_to_impl<std::vector<EC_GROUP_unique_ptr>> {
+  static constexpr auto _(
+      flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
+          flat_buffers_vector) noexcept
+      -> std::expected<std::vector<EC_GROUP_unique_ptr>, std::string> {
+    std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
+    ec_group_by_curves_name.reserve(flat_buffers_vector->size());
+    for (auto const *const curve_name : *flat_buffers_vector) {
+      auto const curve_nid = OBJ_sn2nid(curve_name->c_str());
+      UNEXPECTED_IF(
+          curve_nid == NID_undef,
+          std::format("Can not find the nid of ({})", curve_name->str()))
+      EC_GROUP_unique_ptr ec_group_unique_ptr{
+          EC_GROUP_new_by_curve_name(curve_nid), ::EC_GROUP_free};
+      OSSL_CHECK_NULL_OR_UNEXPECTED(
+          ec_group_unique_ptr,
+          std::format("Can not create group for the nid : ({}) : ", curve_nid));
+      ec_group_by_curves_name.emplace_back(std::move(ec_group_unique_ptr));
+    }
+    return ec_group_by_curves_name;
+  }
+};
+
+template <>
+struct [[nodiscard]] convert_to_impl<std::vector<EC_POINT_unique_ptr>> {
+  static constexpr auto _(
+      flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
+          flat_buffers_vector_groups_names,
+      flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
+          flat_buffers_vector_points) noexcept
+      -> std::expected<std::vector<EC_POINT_unique_ptr>, std::string> {
+    std::vector<EC_POINT_unique_ptr> ec_points;
+
+    UNEXPECTED_IF(
+        flat_buffers_vector_groups_names->size() not_eq
+            flat_buffers_vector_points->size(),
+        "ec_groups and postulate_random_points do not have the same size")
+
+    ec_points.reserve(flat_buffers_vector_groups_names->size());
+
+    for (auto const [group_name, postulate_random_point] :
+         std::ranges::views::zip(*flat_buffers_vector_groups_names,
+                                 *flat_buffers_vector_points)) {
+      ASSIGN_OR_UNEXPECTED(
+          auto const ec_group,
+          crypto::get_ec_group_by_curves_name(group_name->str()));
+
+      ASSIGN_OR_UNEXPECTED(
+          auto ec_point,
+          hex_to_EC_POINT(ec_group, postulate_random_point->str()))
+
+      ec_points.push_back(std::move(ec_point));
+    }
+
+    return ec_points;
+  }
+};
+
+template <typename DestType>
+[[nodiscard]] auto convert_to(
+    flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
+        flat_buffers_vector) noexcept -> std::expected<DestType, std::string> {
+  return convert_to_impl<DestType>::_(flat_buffers_vector);
 }
 
-auto get_ec_group_by_curves_name(std::vector<std::string> const &curves_name)
-    -> std::expected<std::vector<EC_GROUP_unique_ptr>, std::string> {
-  std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
-  ec_group_by_curves_name.reserve(curves_name.size());
-  for (auto const &curve_name : curves_name) {
-    auto const curve_nid = OBJ_sn2nid(curve_name.c_str());
-    UNEXPECTED_IF(curve_nid == NID_undef,
-                  std::format("Can not find the nid of ({})", curve_name))
-    EC_GROUP_unique_ptr ec_group_unique_ptr{
-        EC_GROUP_new_by_curve_name(curve_nid), ::EC_GROUP_free};
-    OSSL_CHECK_NULL_OR_UNEXPECTED(
-        ec_group_unique_ptr,
-        std::format("Can not create group for the nid : ({}) : ", curve_nid));
-    ec_group_by_curves_name.emplace_back(std::move(ec_group_unique_ptr));
-  }
-  return ec_group_by_curves_name;
+template <typename DestType>
+[[nodiscard]] auto convert_to(
+    flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
+        flat_buffers_vector_groups_names,
+    flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
+        flat_buffers_vector_points) noexcept
+    -> std::expected<DestType, std::string> {
+  return convert_to_impl<DestType>::_(flat_buffers_vector_groups_names,
+                                      flat_buffers_vector_points);
 }
 
 auto BIGNUM_to_dec(BN_unique_ptr const &bignumber)
@@ -293,17 +513,6 @@ auto BIGNUM_to_dec(BN_unique_ptr const &bignumber)
       num_dec_str, "Cannot convert BIG NUMBER to decimal string : ")
 
   return std::string{num_dec_str.get(), std::strlen(num_dec_str.get())};
-}
-
-auto hex_to_BIGNUM(std::string const &hex_big_num)
-    -> std::expected<BN_unique_ptr const, std::string> {
-  BN_unique_ptr big_number{BN_unique_ptr(BN_new(), ::BN_free)};
-
-  BIGNUM *ptr = big_number.get();
-  OSSL_CHECK_OR_UNEXPECTED(BN_hex2bn(&ptr, hex_big_num.c_str()),
-                           "Cannot convert hexa string to BIG NUMBER");
-
-  return big_number;
 }
 
 auto BIGNUM_to_hex(BN_unique_ptr const &bignumber)
@@ -328,19 +537,6 @@ auto EC_POINT_to_hex(EC_GROUP_unique_ptr const &group,
 
   return std::string{point_position_hex_str.get(),
                      std::strlen(point_position_hex_str.get())};
-}
-
-auto hex_to_EC_POINT(EC_GROUP_unique_ptr const &group,
-                     std::string const &point_hex)
-    -> std::expected<EC_POINT_unique_ptr, std::string> {
-  EC_POINT_unique_ptr point_ec{EC_POINT_new(group.get()), ::EC_POINT_free};
-
-  OSSL_CHECK_NULL_OR_UNEXPECTED(
-      EC_POINT_hex2point(group.get(), point_hex.c_str(), point_ec.get(),
-                         nullptr),
-      "Cannot convert hexa string to EC_POINT ");
-
-  return point_ec;
 }
 
 auto EC_POINTS_to_hex(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
@@ -481,8 +677,8 @@ auto hash_to_BIGNUM(std::vector<std::string> const &data)
   OSSL_CHECK_OR_UNEXPECTED(
       EVP_DigestFinal_ex(mdctx.get(), hash.data(), nullptr),
       "hash_to_BIGNUM EVP_DigestFinal_ex fail ");
-  BN_unique_ptr hash_number{BN_unique_ptr(
-      BN_bin2bn(hash.data(), SHA256_DIGEST_LENGTH, nullptr), ::BN_free)};
+  BN_unique_ptr hash_number(
+      BN_bin2bn(hash.data(), SHA256_DIGEST_LENGTH, nullptr), ::BN_free);
   OSSL_CHECK_NULL_OR_UNEXPECTED(mdctx, "hash_to_BIGNUM BN_bin2bn fail ")
   return hash_number;
 }
@@ -493,10 +689,9 @@ auto generate_commitment(
     std::vector<EC_POINT_unique_ptr> const &postulate_random_points,
     BN_unique_ptr const &secret)
     -> std::expected<std::vector<EC_POINT_unique_ptr>, std::string> {
-  if (ec_groups.size() not_eq postulate_random_points.size()) {
-    std::unexpected(
-        "ec_groups and postulate_random_points do not have the same size");
-  }
+  UNEXPECTED_IF(
+      ec_groups.size() not_eq postulate_random_points.size(),
+      "ec_groups and postulate_random_points do not have the same size")
 
   std::vector<EC_POINT_unique_ptr> commitments;
   commitments.reserve(ec_groups.size());
@@ -519,10 +714,9 @@ auto generate_transient_challenge(
     -> std::expected<
         std::tuple<BN_unique_ptr, std::vector<EC_POINT_unique_ptr>>,
         std::string> {
-  if (ec_groups.size() not_eq postulate_random_points.size()) {
-    std::unexpected(
-        "ec_groups and postulate_random_points do not have the same size");
-  }
+  UNEXPECTED_IF(
+      ec_groups.size() not_eq postulate_random_points.size(),
+      "ec_groups and postulate_random_points do not have the same size")
 
   std::vector<EC_POINT_unique_ptr> transient_points;
   BN_unique_ptr const order_mean{BN_unique_ptr(BN_new(), ::BN_free)};
@@ -548,13 +742,13 @@ auto generate_transient_challenge(
                            "Bad execution of BN_div ");
   BN_unique_ptr nonce{BN_unique_ptr(BN_new(), ::BN_free)};
   OSSL_CHECK_OR_UNEXPECTED(BN_rand_range(nonce.get(), order_mean.get()),
-                           "Bad execution of BN_rand_range ");
+                           "Bad execution of BN_rand_range ")
 
-  for (auto const &[group, postulate_random_point] :
+  for (auto const &[ec_group, postulate_random_point] :
        std::ranges::views::zip(ec_groups, postulate_random_points)) {
-    EC_POINT_unique_ptr point{EC_POINT_new(group.get()), ::EC_POINT_free};
+    EC_POINT_unique_ptr point{EC_POINT_new(ec_group.get()), ::EC_POINT_free};
     OSSL_CHECK_OR_UNEXPECTED(
-        EC_POINT_mul(group.get(), point.get(), nullptr,
+        EC_POINT_mul(ec_group.get(), point.get(), nullptr,
                      postulate_random_point.get(), nonce.get(), nullptr),
         "ERROR EC_POINT_mul");
     transient_points.emplace_back(std::move(point));
@@ -589,7 +783,8 @@ auto generate_challenge(
     }
 
     OSSL_CHECK_OR_UNEXPECTED(EVP_DigestUpdate(mdctx.get(), buf, size),
-                             "ERROR: EVP_DigestUpdate");
+                             "ERROR: EVP_DigestUpdate")
+
     OPENSSL_secure_clear_free(buf, size);
 
     size = EC_POINT_point2buf(group.get(), transient_point.get(),
@@ -599,7 +794,7 @@ auto generate_challenge(
     }
 
     OSSL_CHECK_OR_UNEXPECTED(EVP_DigestUpdate(mdctx.get(), buf, size),
-                             "ERROR: EVP_DigestUpdate");
+                             "ERROR: EVP_DigestUpdate")
     OPENSSL_secure_clear_free(buf, size);
   }
 
@@ -608,26 +803,54 @@ auto generate_challenge(
       EVP_DigestFinal_ex(mdctx.get(), hash.data(), nullptr),
       "ERROR: EVP_DigestFinal_ex");
 
-  BN_unique_ptr challenge{BN_unique_ptr(BN_new(), ::BN_free)};
+  BN_unique_ptr challenge{BN_new(), ::BN_free};
   BN_bin2bn(hash.data(), SHA256_DIGEST_LENGTH, challenge.get());
   return challenge;
 }
 
-auto solve_challenge(BN_unique_ptr const &secret, BN_unique_ptr const &nonce,
+auto solve_challenge(BN_unique_ptr const &witness, BN_unique_ptr const &nonce,
                      BN_unique_ptr const &challenge)
     -> std::expected<BN_unique_ptr, std::string> {
-  BN_CTX_unique_ptr const bn_ctx{
-      BN_CTX_unique_ptr(BN_CTX_new(), ::BN_CTX_free)};
-  BN_unique_ptr response{BN_unique_ptr(BN_new(), ::BN_free)};
+  BN_CTX_unique_ptr const bn_ctx(BN_CTX_new(), ::BN_CTX_free);
+
+  BN_unique_ptr response(BN_new(), ::BN_free);
 
   //  r = (v - (x * c))
-  // r_response = (v_commitment - (x_secret * c_challenge))
+  // r_response = (v_commitment - (x_witness * c_challenge))
   OSSL_CHECK_OR_UNEXPECTED(
-      BN_mul(response.get(), secret.get(), challenge.get(), bn_ctx.get()),
-      "solve_challenge BN_mul error ");
+      BN_mul(response.get(), witness.get(), challenge.get(), bn_ctx.get()),
+      "solve_challenge BN_mul error ")
   OSSL_CHECK_OR_UNEXPECTED(BN_sub(response.get(), nonce.get(), response.get()),
-                           "solve_challenge BN_sub error ");
+                           "solve_challenge BN_sub error ")
   return response;
+}
+
+auto solve_challenge(std::string const &secret,
+                     std::string const &proving_form_b64)
+    -> std::expected<std::string, std::string> {
+  ASSIGN_OR_EXIT(auto const buffer_proving_form_bytes,
+                 crypto::base64Decode(proving_form_b64))
+
+  ASSIGN_OR_EXIT(
+      auto const buffer_proving_form_received,
+      flatbuffer_to_struct<zerauth::Proving>(buffer_proving_form_bytes))
+
+  ASSIGN_OR_UNEXPECTED(auto const witness, crypto::hash_to_BIGNUM({secret}))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const nonce,
+      crypto::hex_to_BIGNUM(buffer_proving_form_received->nonce()->str()))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const challenge,
+      crypto::hex_to_BIGNUM(buffer_proving_form_received->challenge()->str()))
+
+  ASSIGN_OR_EXIT(auto const response,
+                 crypto::solve_challenge(witness, nonce, challenge))
+
+  ASSIGN_OR_EXIT(auto response_hex, crypto::BIGNUM_to_hex(response))
+
+  return response_hex;
 }
 
 auto verify(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
@@ -645,19 +868,19 @@ auto verify(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
     OSSL_CHECK_OR_UNEXPECTED(
         EC_POINT_mul(ec_group.get(), point_step_one.get(), nullptr,
                      postulate_random_point.get(), proof.get(), nullptr),
-        "verify EC_POINT_mul error ");
+        "verify EC_POINT_mul error ")
     EC_POINT_unique_ptr point_step_two{EC_POINT_new(ec_group.get()),
                                        ::EC_POINT_free};
     OSSL_CHECK_OR_UNEXPECTED(
         EC_POINT_mul(ec_group.get(), point_step_two.get(), nullptr,
                      commitment.get(), challenge.get(), nullptr),
-        "verify EC_POINT_mul error ");
+        "verify EC_POINT_mul error ")
     EC_POINT_unique_ptr point_step_three{EC_POINT_new(ec_group.get()),
                                          ::EC_POINT_free};
     OSSL_CHECK_OR_UNEXPECTED(
         EC_POINT_add(ec_group.get(), point_step_three.get(),
                      point_step_one.get(), point_step_two.get(), nullptr),
-        "verify EC_POINT_add error ");
+        "verify EC_POINT_add error ")
 
     switch (EC_POINT_cmp(ec_group.get(), transient_point.get(),
                          point_step_three.get(), nullptr)) {
@@ -679,95 +902,55 @@ auto verify(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
   return true;
 }
 
+[[nodiscard]]
+auto verify(std::string const &proof_hex,
+            std::string const &transient_parameter_b64)
+    -> std::expected<bool, std::string> {
+  ASSIGN_OR_EXIT(auto const transient_parameter_bytes,
+                 crypto::base64Decode(transient_parameter_b64))
+
+  ASSIGN_OR_EXIT(auto const buffer_transient_received,
+                 crypto::flatbuffer_to_struct<zerauth::Transient>(
+                     transient_parameter_bytes))
+
+  ASSIGN_OR_EXIT(auto const proof, hex_to_BIGNUM(proof_hex))
+
+  ASSIGN_OR_EXIT(
+      auto const nonce,
+      hex_to_BIGNUM(buffer_transient_received->proving()->nonce()->str()))
+
+  ASSIGN_OR_EXIT(
+      auto const challenge,
+      hex_to_BIGNUM(buffer_transient_received->proving()->challenge()->str()))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const ec_groups,
+      crypto::convert_to<std::vector<crypto::EC_GROUP_unique_ptr>>(
+          buffer_transient_received->setup()->curve_names()))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const postulate_random_points,
+      crypto::convert_to<std::vector<crypto::EC_POINT_unique_ptr>>(
+          buffer_transient_received->setup()->curve_names(),
+          buffer_transient_received->setup()->postulate_coordinates()))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const commitments,
+      crypto::convert_to<std::vector<crypto::EC_POINT_unique_ptr>>(
+          buffer_transient_received->setup()->curve_names(),
+          buffer_transient_received->setup()->commitment_coordinates()))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const transient_points,
+      crypto::convert_to<std::vector<crypto::EC_POINT_unique_ptr>>(
+          buffer_transient_received->setup()->curve_names(),
+          buffer_transient_received->challenge_coordinates()))
+
+  return verify(ec_groups, postulate_random_points, commitments,
+                transient_points, challenge, proof);
+}
+
 }  // namespace crypto
-
-template <crypto::VerifierRequest VerifierType>
-struct [[nodiscard]] VerifyBuffer_impl;
-
-#define DECLARE_VERIFY_BUFFER_IMPL(Type)                                       \
-  template <>                                                                  \
-  struct [[nodiscard]] VerifyBuffer_impl<zerauth::Type> {                      \
-    static constexpr auto _(flatbuffers::Verifier verifier) noexcept -> bool { \
-      return zerauth::Verify##Type##Buffer(verifier);                          \
-    }                                                                          \
-  };
-
-DECLARE_VERIFY_BUFFER_IMPL(Setup)
-DECLARE_VERIFY_BUFFER_IMPL(Proving)
-DECLARE_VERIFY_BUFFER_IMPL(Transient)
-#undef DECLARE_VERIFY_BUFFER_IMPL
-
-template <crypto::VerifierRequest VerifierType>
-[[nodiscard]] auto VerifyBuffer(flatbuffers::Verifier verifier) noexcept
-    -> bool {
-  return VerifyBuffer_impl<VerifierType>::_(verifier);
-}
-
-template bool VerifyBuffer<zerauth::Setup>(flatbuffers::Verifier);
-template bool VerifyBuffer<zerauth::Proving>(flatbuffers::Verifier);
-template bool VerifyBuffer<zerauth::Transient>(flatbuffers::Verifier);
-
-template <crypto::VerifierRequest VerifierType>
-[[nodiscard]] auto flatbuffer_to_struct(std::span<uint8_t const> const &buffer)
-    -> std::expected<
-        std::invoke_result_t<decltype(&flatbuffers::GetRoot<VerifierType>),
-                             void const *>,
-        std::string> {
-  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
-
-  UNEXPECTED_IF(not VerifyBuffer<VerifierType>(verifier),
-                "VerifyBuffer verification failed")
-
-  return flatbuffers::GetRoot<VerifierType>(buffer.data());
-}
-
-#define INSTANTIATE_FLATBUFFER_TO_STRUCT(Type)                             \
-  template std::expected<                                                  \
-      std::invoke_result_t<decltype(&flatbuffers::GetRoot<zerauth::Type>), \
-                           void const *>,                                  \
-      std::string>                                                         \
-  flatbuffer_to_struct<zerauth::Type>(std::span<uint8_t const> const &);
-
-INSTANTIATE_FLATBUFFER_TO_STRUCT(Setup)
-INSTANTIATE_FLATBUFFER_TO_STRUCT(Proving)
-INSTANTIATE_FLATBUFFER_TO_STRUCT(Transient)
-
-#undef INSTANTIATE_FLATBUFFER_TO_STRUCT
-
-template <crypto::VerifierRequest VerifierType>
-[[nodiscard]] auto flatbuffer_to_json(
-    std::span<uint8_t const> const &buffer, std::string const &schema_file_name,
-    std::vector<std::string> const &include_dirs = {})
-    -> std::expected<std::string, std::string> {
-  std::string schema_file;
-
-  UNEXPECTED_IF(
-      not flatbuffers::LoadFile(schema_file_name.c_str(), false, &schema_file),
-      std::format("Failed to load schema file {}", schema_file_name))
-
-  flatbuffers::Parser parser;
-  parser.opts.indent_step = 2;  // pretty JSON
-  char const **paths_view = (char const **)(include_dirs.data());
-
-  UNEXPECTED_IF(not parser.Parse(schema_file.c_str(), paths_view),
-                std::format("Schema parse failed: -- {}", schema_file))
-  UNEXPECTED_IF(parser.root_struct_def_ == nullptr,
-                "No root type defined in schema")
-
-  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
-
-  UNEXPECTED_IF(not VerifyBuffer<VerifierType>(verifier),
-                "VerifyBuffer verification failed")
-
-  std::string json;
-  auto const *const err =
-      flatbuffers::GenerateText(parser, buffer.data(), &json);
-
-  UNEXPECTED_IF(err not_eq nullptr,
-                std::format("Failed to generate JSON {}", err))
-
-  return json;
-}
 
 [[nodiscard]]
 auto flat_buffer_build_transient_builder(
@@ -778,6 +961,7 @@ auto flat_buffer_build_transient_builder(
     std::vector<std::string> const &transient_challenge_hex) noexcept
     -> flatbuffers::FlatBufferBuilder {
   flatbuffers::FlatBufferBuilder builder;
+
   builder.Finish(zerauth::CreateTransient(
       builder,
       zerauth::CreateSetup(
@@ -797,6 +981,7 @@ auto flat_buffer_build_setup_builder(
     std::vector<std::string> const &commitments_points_hex) noexcept
     -> flatbuffers::FlatBufferBuilder {
   flatbuffers::FlatBufferBuilder builder;
+
   builder.Finish(zerauth::CreateSetup(
       builder, builder.CreateVectorOfStrings(curve_names_selected),
       builder.CreateVectorOfStrings(postulate_random_points_hex),
@@ -810,6 +995,7 @@ auto flat_buffer_build_proving_builder(
     std::string const &nonce_hex, std::string const &challenge_hex) noexcept
     -> flatbuffers::FlatBufferBuilder {
   flatbuffers::FlatBufferBuilder builder;
+
   builder.Finish(
       zerauth::CreateProving(builder, builder.CreateString(nonce_hex.c_str()),
                              builder.CreateString(challenge_hex.c_str())));
@@ -852,7 +1038,7 @@ auto create_commitment_setup(
 
   ASSIGN_OR_UNEXPECTED(
       auto const ec_groups,
-      crypto::get_ec_group_by_curves_name(curve_names_selected));
+      crypto::get_ec_groups_by_curves_names(curve_names_selected));
 
   ASSIGN_OR_UNEXPECTED(auto const postulate_random_points,
                        crypto::generate_random_points_from(ec_groups));
@@ -872,12 +1058,88 @@ auto create_commitment_setup(
       curve_names_selected, postulate_random_points_hex,
       commitments_points_hex);
 
-  std::span<uint8_t const> const buffer_setup{builder_setup.GetBufferPointer(),
-                                              builder_setup.GetSize()};
-
-  ASSIGN_OR_UNEXPECTED(auto b64_message, crypto::base64Encode(buffer_setup))
+  ASSIGN_OR_UNEXPECTED(auto b64_message,
+                       crypto::base64Encode({builder_setup.GetBufferPointer(),
+                                             builder_setup.GetSize()}))
 
   return b64_message;
+}
+
+auto create_challenge(std::string const &commitment_setup_b64)
+    -> std::expected<std::tuple<std::string, std::string>, std::string> {
+  UNEXPECTED_IF(commitment_setup_b64.empty(),
+                "create_challenge: commitment_setup_b64 is empty")
+
+  ASSIGN_OR_UNEXPECTED(auto const message_buffer,
+                       crypto::base64Decode(commitment_setup_b64))
+
+  ASSIGN_OR_EXIT(auto const buffer_setup_received,
+                 crypto::flatbuffer_to_struct<zerauth::Setup>(message_buffer))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const postulate_coordinates,
+      crypto::convert_to<std::vector<crypto::EC_POINT_unique_ptr>>(
+          buffer_setup_received->curve_names(),
+          buffer_setup_received->postulate_coordinates()))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const ec_groups,
+      crypto::convert_to<std::vector<crypto::EC_GROUP_unique_ptr>>(
+          buffer_setup_received->curve_names()))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const transient_challenge,
+      crypto::generate_transient_challenge(ec_groups, postulate_coordinates))
+
+  auto &&[nonce, transient_points] = transient_challenge;
+
+  ASSIGN_OR_UNEXPECTED(
+      auto const commitments,
+      crypto::convert_to<std::vector<crypto::EC_POINT_unique_ptr>>(
+          buffer_setup_received->curve_names(),
+          buffer_setup_received->commitment_coordinates()))
+
+  ASSIGN_OR_EXIT(
+      auto const challenge,
+      crypto::generate_challenge(ec_groups, commitments, transient_points))
+
+  ASSIGN_OR_EXIT(auto const nonce_hex, crypto::BIGNUM_to_hex(nonce))
+  ASSIGN_OR_EXIT(auto const challenge_hex, crypto::BIGNUM_to_hex(challenge))
+
+  ASSIGN_OR_EXIT(auto const transient_challenge_hex,
+                 crypto::EC_POINTS_to_hex(ec_groups, transient_points))
+
+  auto const builder_proving =
+      flat_buffer_build_proving_builder(nonce_hex, challenge_hex);
+
+  ASSIGN_OR_EXIT(auto const curve_names_selected,
+                 crypto::convert_to<std::vector<std::string>>(
+                     buffer_setup_received->curve_names()))
+
+  ASSIGN_OR_EXIT(auto const postulate_random_points_hex,
+                 crypto::convert_to<std::vector<std::string>>(
+                     buffer_setup_received->postulate_coordinates()))
+
+  ASSIGN_OR_EXIT(auto const commitments_points_hex,
+                 crypto::convert_to<std::vector<std::string>>(
+                     buffer_setup_received->commitment_coordinates()))
+
+  auto const builder_transient = flat_buffer_build_transient_builder(
+      curve_names_selected, postulate_random_points_hex, commitments_points_hex,
+      nonce_hex, challenge_hex, transient_challenge_hex);
+
+  ASSIGN_OR_UNEXPECTED(
+      auto b64_buffer_transient,
+      crypto::base64Encode({builder_transient.GetCurrentBufferPointer(),
+                            builder_transient.GetSize()}))
+
+  ASSIGN_OR_UNEXPECTED(
+      auto b64_buffer_proving,
+      crypto::base64Encode({builder_proving.GetCurrentBufferPointer(),
+                            builder_proving.GetSize()}))
+
+  return std::make_tuple(std::move(b64_buffer_proving),
+                         std::move(b64_buffer_transient));
 }
 
 //
@@ -981,7 +1243,7 @@ auto main(int argc, const char **argv) -> int {
 
   /* ================== Enrolement step Start ================== */
 
-#pragma region Enrolement Step
+#pragma region Setup Enrolement Step
 
   ASSIGN_OR_EXIT(auto const buffer_setup_b64,
                  create_commitment_setup("password", curve_names_selected));
@@ -989,85 +1251,77 @@ auto main(int argc, const char **argv) -> int {
   // enrolement process) The Verifier generate the transient challenge and
   // send it to the prover
 
-#pragma endregion Enrolement Step
+#pragma endregion Setup Enrolement Step
 
   // Alice ask bob to prove that she knows the password, so bob generate the
   // transient challenge (transient_points) based on the
   // postulate_random_points placed on ther respective eliptic curve group and
   // send the transient nonce to Alice
-  ASSIGN_OR_EXIT(auto const buffer_setup,
-                 crypto::base64Decode(buffer_setup_b64));
+#pragma region Challenge Step
   // DEBUG
   {
-    auto const json_setup = flatbuffer_to_json<zerauth::Setup>(
-        {buffer_setup.begin(), buffer_setup.end()}, "flatb/setup_phase.fbs",
-        {"flatb/"});
+    ASSIGN_OR_EXIT(auto const buffer_setup,
+                   crypto::base64Decode(buffer_setup_b64));
+
+    auto const json_setup = crypto::flatbuffer_to_json<zerauth::Setup>(
+        buffer_setup, "flatb/setup_phase.fbs", {"flatb/"});
+
     std::println("--- json_setup ---\n{}",
                  json_setup.value_or(json_setup.error()));
   }
 
-  ASSIGN_OR_EXIT(auto const buffer_setup_received,
-                 flatbuffer_to_struct<zerauth::Setup>(buffer_setup))
+  ASSIGN_OR_EXIT(auto const challenge_phase, create_challenge(buffer_setup_b64))
 
-  auto const curve_names = crypto::convert_to<std::vector<std::string>>(
-      buffer_setup_received->curve_names());
+  auto const &[proving_form_b64, transient_parameter_b64] = challenge_phase;
 
-  // create_challenge
+  // DEBUG
+  {
+    ASSIGN_OR_EXIT(auto const buffer_proving_form,
+                   crypto::base64Decode(proving_form_b64));
 
-  // ASSIGN_OR_EXIT(
-  //     auto const transient_challenge,
-  //     crypto::generate_transient_challenge(ec_groups,
-  //     postulate_random_points))
-  // auto &&[nonce, transient_points] = transient_challenge;
+    auto const json_setup = crypto::flatbuffer_to_json<zerauth::Proving>(
+        buffer_proving_form, "flatb/proving_phase.fbs", {"flatb/"});
 
-  // // Bob also send the challenge generated from the commitment and the
-  // // transient nonce to Alice
-  // ASSIGN_OR_EXIT(
-  //     auto const challenge,
-  //     crypto::generate_challenge(ec_groups, commitments, transient_points))
+    std::println("--- json_setup ---\n{}",
+                 json_setup.value_or(json_setup.error()));
+  }
 
-  // ASSIGN_OR_EXIT(auto const nonce_hex, crypto::BIGNUM_to_hex(nonce))
-  // ASSIGN_OR_EXIT(auto const challenge_hex, crypto::BIGNUM_to_hex(challenge))
+  // DEBUG
+  {
+    ASSIGN_OR_EXIT(auto const buffer_transient_form,
+                   crypto::base64Decode(transient_parameter_b64));
 
-  // auto const builder_proving =
-  //     flat_buffer_build_proving_builder(nonce_hex, challenge_hex);
+    auto const json_setup = crypto::flatbuffer_to_json<zerauth::Transient>(
+        buffer_transient_form, "flatb/transient.fbs", {"flatb/"});
 
-  // auto const json_proving = flatbuffer_to_json<zerauth::Proving>(
-  //     {builder_proving.GetBufferPointer(), builder_proving.GetSize()},
-  //     "flatb/proving_phase.fbs", {"flatb/"});
+    std::println("--- json_setup ---\n{}",
+                 json_setup.value_or(json_setup.error()));
+  }
+#pragma region Challenge Step
 
-  // std::println("--- json_proving ---\n{}",
-  //              json_proving.value_or(json_proving.error()));
+#pragma region Solving Step
 
-  // ASSIGN_OR_EXIT(auto const transient_challenge_hex,
-  //                crypto::EC_POINTS_to_hex(ec_groups, transient_points))
+  ASSIGN_OR_EXIT(auto const proof_hex,
+                 crypto::solve_challenge("password", proving_form_b64))
 
-  // auto const builder_transient = flat_buffer_build_transient_builder(
-  //     curve_names_selected, postulate_random_points_hex,
-  //     commitments_points_hex, nonce_hex, challenge_hex,
-  //     transient_challenge_hex);
-  // auto const json_transient = flatbuffer_to_json<zerauth::Transient>(
-  //     {builder_transient.GetBufferPointer(), builder_transient.GetSize()},
-  //     "flatb/transient.fbs", {"flatb/"});
+#pragma region Solving Step
 
-  // std::println("--- json_transient ---\n{}",
-  //              json_transient.value_or(json_transient.error()));
+  // DEBUG
+  {
+    std::println("Proof is ({})", proof_hex);
+  }
 
-  // // Alice execute and return the response
-  // // Proving : nonce, challenge
-  // ASSIGN_OR_EXIT(auto const response,
-  //                crypto::solve_challenge(secret, nonce, challenge))
-  // // H(nonce, challenge) : Transient =   + Setup{curve_names,
-  // // postulate_coordinates, commitment_coordinates} +
-  // ASSIGN_OR_EXIT(auto const proof,
-  //                crypto::verify(ec_groups, postulate_random_points,
-  //                commitments,
-  //                               transient_points, challenge, response))
-  // if (proof) {
-  //   std::println("Alice proved to Bob she knows the password");
-  // } else {
-  //   std::println("Verification failed");
-  // }
+#pragma region Verification Step
+
+  ASSIGN_OR_EXIT(auto const proof,
+                 crypto::verify(proof_hex, transient_parameter_b64))
+
+  if (proof) {
+    std::println("Alice proved to Bob she knows the password");
+  } else {
+    std::println("Verification failed");
+  }
+#pragma region Verification Step
 
   return 0;
 }
