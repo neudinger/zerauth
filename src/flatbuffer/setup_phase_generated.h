@@ -26,6 +26,7 @@ struct SetupT : public ::flatbuffers::NativeTable {
   std::vector<std::string> curve_names{};
   std::vector<std::string> postulate_coordinates{};
   std::vector<std::string> commitment_coordinates{};
+  std::string salt{};
 };
 
 struct Setup FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -37,7 +38,8 @@ struct Setup FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_CURVE_NAMES = 4,
     VT_POSTULATE_COORDINATES = 6,
-    VT_COMMITMENT_COORDINATES = 8
+    VT_COMMITMENT_COORDINATES = 8,
+    VT_SALT = 10
   };
   const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *curve_names() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *>(VT_CURVE_NAMES);
@@ -57,6 +59,12 @@ struct Setup FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *mutable_commitment_coordinates() {
     return GetPointer<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *>(VT_COMMITMENT_COORDINATES);
   }
+  const ::flatbuffers::String *salt() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SALT);
+  }
+  ::flatbuffers::String *mutable_salt() {
+    return GetPointer<::flatbuffers::String *>(VT_SALT);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_CURVE_NAMES) &&
@@ -68,6 +76,8 @@ struct Setup FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_COMMITMENT_COORDINATES) &&
            verifier.VerifyVector(commitment_coordinates()) &&
            verifier.VerifyVectorOfStrings(commitment_coordinates()) &&
+           VerifyOffset(verifier, VT_SALT) &&
+           verifier.VerifyString(salt()) &&
            verifier.EndTable();
   }
   SetupT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -88,6 +98,9 @@ struct SetupBuilder {
   void add_commitment_coordinates(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> commitment_coordinates) {
     fbb_.AddOffset(Setup::VT_COMMITMENT_COORDINATES, commitment_coordinates);
   }
+  void add_salt(::flatbuffers::Offset<::flatbuffers::String> salt) {
+    fbb_.AddOffset(Setup::VT_SALT, salt);
+  }
   explicit SetupBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -103,8 +116,10 @@ inline ::flatbuffers::Offset<Setup> CreateSetup(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> curve_names = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> postulate_coordinates = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> commitment_coordinates = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> commitment_coordinates = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> salt = 0) {
   SetupBuilder builder_(_fbb);
+  builder_.add_salt(salt);
   builder_.add_commitment_coordinates(commitment_coordinates);
   builder_.add_postulate_coordinates(postulate_coordinates);
   builder_.add_curve_names(curve_names);
@@ -115,15 +130,18 @@ inline ::flatbuffers::Offset<Setup> CreateSetupDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *curve_names = nullptr,
     const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *postulate_coordinates = nullptr,
-    const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *commitment_coordinates = nullptr) {
+    const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *commitment_coordinates = nullptr,
+    const char *salt = nullptr) {
   auto curve_names__ = curve_names ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*curve_names) : 0;
   auto postulate_coordinates__ = postulate_coordinates ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*postulate_coordinates) : 0;
   auto commitment_coordinates__ = commitment_coordinates ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*commitment_coordinates) : 0;
+  auto salt__ = salt ? _fbb.CreateString(salt) : 0;
   return zerauth::CreateSetup(
       _fbb,
       curve_names__,
       postulate_coordinates__,
-      commitment_coordinates__);
+      commitment_coordinates__,
+      salt__);
 }
 
 ::flatbuffers::Offset<Setup> CreateSetup(::flatbuffers::FlatBufferBuilder &_fbb, const SetupT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -140,6 +158,7 @@ inline void Setup::UnPackTo(SetupT *_o, const ::flatbuffers::resolver_function_t
   { auto _e = curve_names(); if (_e) { _o->curve_names.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->curve_names[_i] = _e->Get(_i)->str(); } } else { _o->curve_names.resize(0); } }
   { auto _e = postulate_coordinates(); if (_e) { _o->postulate_coordinates.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->postulate_coordinates[_i] = _e->Get(_i)->str(); } } else { _o->postulate_coordinates.resize(0); } }
   { auto _e = commitment_coordinates(); if (_e) { _o->commitment_coordinates.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->commitment_coordinates[_i] = _e->Get(_i)->str(); } } else { _o->commitment_coordinates.resize(0); } }
+  { auto _e = salt(); if (_e) _o->salt = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<Setup> Setup::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SetupT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -153,26 +172,30 @@ inline ::flatbuffers::Offset<Setup> CreateSetup(::flatbuffers::FlatBufferBuilder
   auto _curve_names = _o->curve_names.size() ? _fbb.CreateVectorOfStrings(_o->curve_names) : 0;
   auto _postulate_coordinates = _o->postulate_coordinates.size() ? _fbb.CreateVectorOfStrings(_o->postulate_coordinates) : 0;
   auto _commitment_coordinates = _o->commitment_coordinates.size() ? _fbb.CreateVectorOfStrings(_o->commitment_coordinates) : 0;
+  auto _salt = _o->salt.empty() ? 0 : _fbb.CreateString(_o->salt);
   return zerauth::CreateSetup(
       _fbb,
       _curve_names,
       _postulate_coordinates,
-      _commitment_coordinates);
+      _commitment_coordinates,
+      _salt);
 }
 
 inline const ::flatbuffers::TypeTable *SetupTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
     { ::flatbuffers::ET_STRING, 1, -1 },
     { ::flatbuffers::ET_STRING, 1, -1 },
-    { ::flatbuffers::ET_STRING, 1, -1 }
+    { ::flatbuffers::ET_STRING, 1, -1 },
+    { ::flatbuffers::ET_STRING, 0, -1 }
   };
   static const char * const names[] = {
     "curve_names",
     "postulate_coordinates",
-    "commitment_coordinates"
+    "commitment_coordinates",
+    "salt"
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 3, type_codes, nullptr, nullptr, nullptr, names
+    ::flatbuffers::ST_TABLE, 4, type_codes, nullptr, nullptr, nullptr, names
   };
   return &tt;
 }

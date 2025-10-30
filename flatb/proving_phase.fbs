@@ -3,6 +3,7 @@ namespace zerauth;
 table Proving {
     nonce: string;
     challenge: string;
+    salt: string;
 }
 
 root_type Proving;

@@ -5,6 +5,7 @@ table Setup {
     curve_names: [string];
     postulate_coordinates: [string];
     commitment_coordinates: [string];
+    salt: string;
 }
 
 root_type Setup;

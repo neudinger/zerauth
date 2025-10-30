@@ -25,6 +25,7 @@ struct ProvingT : public ::flatbuffers::NativeTable {
   typedef Proving TableType;
   std::string nonce{};
   std::string challenge{};
+  std::string salt{};
 };
 
 struct Proving FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -35,7 +36,8 @@ struct Proving FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_NONCE = 4,
-    VT_CHALLENGE = 6
+    VT_CHALLENGE = 6,
+    VT_SALT = 8
   };
   const ::flatbuffers::String *nonce() const {
     return GetPointer<const ::flatbuffers::String *>(VT_NONCE);
@@ -49,12 +51,20 @@ struct Proving FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   ::flatbuffers::String *mutable_challenge() {
     return GetPointer<::flatbuffers::String *>(VT_CHALLENGE);
   }
+  const ::flatbuffers::String *salt() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SALT);
+  }
+  ::flatbuffers::String *mutable_salt() {
+    return GetPointer<::flatbuffers::String *>(VT_SALT);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_NONCE) &&
            verifier.VerifyString(nonce()) &&
            VerifyOffset(verifier, VT_CHALLENGE) &&
            verifier.VerifyString(challenge()) &&
+           VerifyOffset(verifier, VT_SALT) &&
+           verifier.VerifyString(salt()) &&
            verifier.EndTable();
   }
   ProvingT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -72,6 +82,9 @@ struct ProvingBuilder {
   void add_challenge(::flatbuffers::Offset<::flatbuffers::String> challenge) {
     fbb_.AddOffset(Proving::VT_CHALLENGE, challenge);
   }
+  void add_salt(::flatbuffers::Offset<::flatbuffers::String> salt) {
+    fbb_.AddOffset(Proving::VT_SALT, salt);
+  }
   explicit ProvingBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -86,8 +99,10 @@ struct ProvingBuilder {
 inline ::flatbuffers::Offset<Proving> CreateProving(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> nonce = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> challenge = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> challenge = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> salt = 0) {
   ProvingBuilder builder_(_fbb);
+  builder_.add_salt(salt);
   builder_.add_challenge(challenge);
   builder_.add_nonce(nonce);
   return builder_.Finish();
@@ -96,13 +111,16 @@ inline ::flatbuffers::Offset<Proving> CreateProving(
 inline ::flatbuffers::Offset<Proving> CreateProvingDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *nonce = nullptr,
-    const char *challenge = nullptr) {
+    const char *challenge = nullptr,
+    const char *salt = nullptr) {
   auto nonce__ = nonce ? _fbb.CreateString(nonce) : 0;
   auto challenge__ = challenge ? _fbb.CreateString(challenge) : 0;
+  auto salt__ = salt ? _fbb.CreateString(salt) : 0;
   return zerauth::CreateProving(
       _fbb,
       nonce__,
-      challenge__);
+      challenge__,
+      salt__);
 }
 
 ::flatbuffers::Offset<Proving> CreateProving(::flatbuffers::FlatBufferBuilder &_fbb, const ProvingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -118,6 +136,7 @@ inline void Proving::UnPackTo(ProvingT *_o, const ::flatbuffers::resolver_functi
   (void)_resolver;
   { auto _e = nonce(); if (_e) _o->nonce = _e->str(); }
   { auto _e = challenge(); if (_e) _o->challenge = _e->str(); }
+  { auto _e = salt(); if (_e) _o->salt = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<Proving> Proving::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ProvingT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -130,23 +149,27 @@ inline ::flatbuffers::Offset<Proving> CreateProving(::flatbuffers::FlatBufferBui
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ProvingT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
   auto _nonce = _o->nonce.empty() ? 0 : _fbb.CreateString(_o->nonce);
   auto _challenge = _o->challenge.empty() ? 0 : _fbb.CreateString(_o->challenge);
+  auto _salt = _o->salt.empty() ? 0 : _fbb.CreateString(_o->salt);
   return zerauth::CreateProving(
       _fbb,
       _nonce,
-      _challenge);
+      _challenge,
+      _salt);
 }
 
 inline const ::flatbuffers::TypeTable *ProvingTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
     { ::flatbuffers::ET_STRING, 0, -1 },
+    { ::flatbuffers::ET_STRING, 0, -1 },
     { ::flatbuffers::ET_STRING, 0, -1 }
   };
   static const char * const names[] = {
     "nonce",
-    "challenge"
+    "challenge",
+    "salt"
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 2, type_codes, nullptr, nullptr, nullptr, names
+    ::flatbuffers::ST_TABLE, 3, type_codes, nullptr, nullptr, nullptr, names
   };
   return &tt;
 }

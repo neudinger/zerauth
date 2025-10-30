@@ -25,6 +25,7 @@
 
 #include <print>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -835,7 +836,10 @@ auto solve_challenge(std::string const &secret,
       auto const buffer_proving_form_received,
       flatbuffer_to_struct<zerauth::Proving>(buffer_proving_form_bytes))
 
-  ASSIGN_OR_UNEXPECTED(auto const witness, crypto::hash_to_BIGNUM({secret}))
+  ASSIGN_OR_UNEXPECTED(
+      auto const witness,
+      crypto::hash_to_BIGNUM(
+          {buffer_proving_form_received->salt()->str(), secret}))
 
   ASSIGN_OR_UNEXPECTED(
       auto const nonce,
@@ -958,8 +962,8 @@ auto flat_buffer_build_transient_builder(
     std::vector<std::string> const &postulate_random_points_hex,
     std::vector<std::string> const &commitments_points_hex,
     std::string const &nonce_hex, std::string const &challenge_hex,
-    std::vector<std::string> const &transient_challenge_hex) noexcept
-    -> flatbuffers::FlatBufferBuilder {
+    std::vector<std::string> const &transient_challenge_hex,
+    std::string const &salt) noexcept -> flatbuffers::FlatBufferBuilder {
   flatbuffers::FlatBufferBuilder builder;
 
   builder.Finish(zerauth::CreateTransient(
@@ -967,9 +971,11 @@ auto flat_buffer_build_transient_builder(
       zerauth::CreateSetup(
           builder, builder.CreateVectorOfStrings(curve_names),
           builder.CreateVectorOfStrings(postulate_random_points_hex),
-          builder.CreateVectorOfStrings(commitments_points_hex)),
+          builder.CreateVectorOfStrings(commitments_points_hex),
+          builder.CreateString(salt)),
       zerauth::CreateProving(builder, builder.CreateString(nonce_hex.c_str()),
-                             builder.CreateString(challenge_hex.c_str())),
+                             builder.CreateString(challenge_hex.c_str()),
+                             builder.CreateString(salt)),
       builder.CreateVectorOfStrings(transient_challenge_hex)));
   return builder;
 }
@@ -978,27 +984,29 @@ auto flat_buffer_build_transient_builder(
 auto flat_buffer_build_setup_builder(
     std::vector<std::string> const &curve_names_selected,
     std::vector<std::string> const &postulate_random_points_hex,
-    std::vector<std::string> const &commitments_points_hex) noexcept
-    -> flatbuffers::FlatBufferBuilder {
+    std::vector<std::string> const &commitments_points_hex,
+    std::string const &salt) noexcept -> flatbuffers::FlatBufferBuilder {
   flatbuffers::FlatBufferBuilder builder;
 
   builder.Finish(zerauth::CreateSetup(
       builder, builder.CreateVectorOfStrings(curve_names_selected),
       builder.CreateVectorOfStrings(postulate_random_points_hex),
-      builder.CreateVectorOfStrings(commitments_points_hex)));
+      builder.CreateVectorOfStrings(commitments_points_hex),
+      builder.CreateString(salt)));
 
   return builder;
 }
 
 [[nodiscard]]
-auto flat_buffer_build_proving_builder(
-    std::string const &nonce_hex, std::string const &challenge_hex) noexcept
+auto flat_buffer_build_proving_builder(std::string const &nonce_hex,
+                                       std::string const &challenge_hex,
+                                       std::string const &salt) noexcept
     -> flatbuffers::FlatBufferBuilder {
   flatbuffers::FlatBufferBuilder builder;
 
-  builder.Finish(
-      zerauth::CreateProving(builder, builder.CreateString(nonce_hex.c_str()),
-                             builder.CreateString(challenge_hex.c_str())));
+  builder.Finish(zerauth::CreateProving(
+      builder, builder.CreateString(nonce_hex.c_str()),
+      builder.CreateString(challenge_hex.c_str()), builder.CreateString(salt)));
   return builder;
 }
 
@@ -1032,9 +1040,10 @@ auto list_curve_name() noexcept
 
 auto create_commitment_setup(
     std::string const &secret,
-    std::vector<std::string> const &curve_names_selected)
-    -> std::expected<std::string, std::string> {
-  ASSIGN_OR_UNEXPECTED(auto const witness, crypto::hash_to_BIGNUM({secret}));
+    std::vector<std::string> const &curve_names_selected,
+    std::string const &salt = "") -> std::expected<std::string, std::string> {
+  ASSIGN_OR_UNEXPECTED(auto const witness,
+                       crypto::hash_to_BIGNUM({salt, secret}));
 
   ASSIGN_OR_UNEXPECTED(
       auto const ec_groups,
@@ -1055,8 +1064,8 @@ auto create_commitment_setup(
                        crypto::EC_POINTS_to_hex(ec_groups, commitments))
 
   auto const builder_setup = flat_buffer_build_setup_builder(
-      curve_names_selected, postulate_random_points_hex,
-      commitments_points_hex);
+      curve_names_selected, postulate_random_points_hex, commitments_points_hex,
+      salt);
 
   ASSIGN_OR_UNEXPECTED(auto b64_message,
                        crypto::base64Encode({builder_setup.GetBufferPointer(),
@@ -1109,8 +1118,8 @@ auto create_challenge(std::string const &commitment_setup_b64)
   ASSIGN_OR_EXIT(auto const transient_challenge_hex,
                  crypto::EC_POINTS_to_hex(ec_groups, transient_points))
 
-  auto const builder_proving =
-      flat_buffer_build_proving_builder(nonce_hex, challenge_hex);
+  auto const builder_proving = flat_buffer_build_proving_builder(
+      nonce_hex, challenge_hex, buffer_setup_received->salt()->str());
 
   ASSIGN_OR_EXIT(auto const curve_names_selected,
                  crypto::convert_to<std::vector<std::string>>(
@@ -1126,7 +1135,8 @@ auto create_challenge(std::string const &commitment_setup_b64)
 
   auto const builder_transient = flat_buffer_build_transient_builder(
       curve_names_selected, postulate_random_points_hex, commitments_points_hex,
-      nonce_hex, challenge_hex, transient_challenge_hex);
+      nonce_hex, challenge_hex, transient_challenge_hex,
+      buffer_setup_received->salt()->str());
 
   ASSIGN_OR_UNEXPECTED(
       auto b64_buffer_transient,
@@ -1140,6 +1150,99 @@ auto create_challenge(std::string const &commitment_setup_b64)
 
   return std::make_tuple(std::move(b64_buffer_proving),
                          std::move(b64_buffer_transient));
+}
+
+auto random_curves_selections(size_t const &size) -> std::vector<std::string> {
+  std::vector<std::string> curve_names_selected;
+  curve_names_selected.reserve(size);
+  std::vector<std::string> const curve_names_possible{"secp112r1",
+                                                      "secp112r2",
+                                                      "secp128r1",
+                                                      "secp128r2",
+                                                      "secp160k1",
+                                                      "secp160r1",
+                                                      "secp160r2",
+                                                      "secp192k1",
+                                                      "secp224k1",
+                                                      "secp224r1",
+                                                      "secp256k1",
+                                                      "secp384r1",
+                                                      "secp521r1",
+                                                      "prime192v1",
+                                                      "prime192v2",
+                                                      "prime192v3",
+                                                      "prime239v1",
+                                                      "prime239v2",
+                                                      "prime239v3",
+                                                      "prime256v1",
+                                                      "sect113r1",
+                                                      "sect113r2",
+                                                      "sect131r1",
+                                                      "sect131r2",
+                                                      "sect163k1",
+                                                      "sect163r1",
+                                                      "sect163r2",
+                                                      "sect193r1",
+                                                      "sect193r2",
+                                                      "sect233k1",
+                                                      "sect233r1",
+                                                      "sect239k1",
+                                                      "sect283k1",
+                                                      "sect283r1",
+                                                      "sect409k1",
+                                                      "sect409r1",
+                                                      "sect571k1",
+                                                      "sect571r1",
+                                                      "c2pnb163v1",
+                                                      "c2pnb163v2",
+                                                      "c2pnb163v3",
+                                                      "c2pnb176v1",
+                                                      "c2tnb191v1",
+                                                      "c2tnb191v2",
+                                                      "c2tnb191v3",
+                                                      "c2pnb208w1",
+                                                      "c2tnb239v1",
+                                                      "c2tnb239v2",
+                                                      "c2tnb239v3",
+                                                      "c2pnb272w1",
+                                                      "c2pnb304w1",
+                                                      "c2tnb359v1",
+                                                      "c2pnb368w1",
+                                                      "c2tnb431r1",
+                                                      "wap-wsg-idm-ecid-wtls1",
+                                                      "wap-wsg-idm-ecid-wtls3",
+                                                      "wap-wsg-idm-ecid-wtls4",
+                                                      "wap-wsg-idm-ecid-wtls5",
+                                                      "wap-wsg-idm-ecid-wtls6",
+                                                      "wap-wsg-idm-ecid-wtls7",
+                                                      "wap-wsg-idm-ecid-wtls8",
+                                                      "wap-wsg-idm-ecid-wtls9",
+                                                      "wap-wsg-idm-ecid-wtls10",
+                                                      "wap-wsg-idm-ecid-wtls11",
+                                                      "wap-wsg-idm-ecid-wtls12",
+                                                      "brainpoolP160r1",
+                                                      "brainpoolP160t1",
+                                                      "brainpoolP192r1",
+                                                      "brainpoolP192t1",
+                                                      "brainpoolP224r1",
+                                                      "brainpoolP224t1",
+                                                      "brainpoolP256r1",
+                                                      "brainpoolP256t1",
+                                                      "brainpoolP320r1",
+                                                      "brainpoolP320t1",
+                                                      "brainpoolP384r1",
+                                                      "brainpoolP384t1",
+                                                      "brainpoolP512r1",
+                                                      "brainpoolP512t1"};
+
+  std::random_device random_device;
+  std::default_random_engine generator(random_device());
+
+  std::ranges::sample(curve_names_possible.begin(), curve_names_possible.end(),
+                      std::back_inserter(curve_names_selected),
+                      static_cast<long>(size), generator);
+
+  return curve_names_selected;
 }
 
 //
@@ -1161,92 +1264,16 @@ auto create_challenge(std::string const &commitment_setup_b64)
 // https://docs.zkproof.org/pages/standards/accepted-workshop4/proposal-sigma.pdf
 auto main(int argc, const char **argv) -> int {
   //  openssl ecparam -list_curves
-  std::vector<std::string> const curve_names_selected = {"secp112r1",
-                                                   "secp112r2",
-/*                                                    "secp128r1",
-                                                   "secp128r2",
-                                                   "secp160k1",
-                                                   "secp160r1",
-                                                   "secp160r2",
-                                                   "secp192k1",
-                                                   "secp224k1",
-                                                   "secp224r1",
-                                                   "secp256k1",
-                                                   "secp384r1",
-                                                   "secp521r1",
-                                                   "prime192v1",
-                                                   "prime192v2",
-                                                   "prime192v3",
-                                                   "prime239v1",
-                                                   "prime239v2",
-                                                   "prime239v3",
-                                                   "prime256v1",
-                                                   "sect113r1",
-                                                   "sect113r2",
-                                                   "sect131r1",
-                                                   "sect131r2",
-                                                   "sect163k1",
-                                                   "sect163r1",
-                                                   "sect163r2",
-                                                   "sect193r1",
-                                                   "sect193r2",
-                                                   "sect233k1",
-                                                   "sect233r1",
-                                                   "sect239k1",
-                                                   "sect283k1",
-                                                   "sect283r1",
-                                                   "sect409k1",
-                                                   "sect409r1",
-                                                   "sect571k1",
-                                                   "sect571r1",
-                                                   "c2pnb163v1",
-                                                   "c2pnb163v2",
-                                                   "c2pnb163v3",
-                                                   "c2pnb176v1",
-                                                   "c2tnb191v1",
-                                                   "c2tnb191v2",
-                                                   "c2tnb191v3",
-                                                   "c2pnb208w1",
-                                                   "c2tnb239v1",
-                                                   "c2tnb239v2",
-                                                   "c2tnb239v3",
-                                                   "c2pnb272w1",
-                                                   "c2pnb304w1",
-                                                   "c2tnb359v1",
-                                                   "c2pnb368w1",
-                                                   "c2tnb431r1",
-                                                   "wap-wsg-idm-ecid-wtls1",
-                                                   "wap-wsg-idm-ecid-wtls3",
-                                                   "wap-wsg-idm-ecid-wtls4",
-                                                   "wap-wsg-idm-ecid-wtls5",
-                                                   "wap-wsg-idm-ecid-wtls6",
-                                                   "wap-wsg-idm-ecid-wtls7",
-                                                   "wap-wsg-idm-ecid-wtls8",
-                                                   "wap-wsg-idm-ecid-wtls9",
-                                                   "wap-wsg-idm-ecid-wtls10",
-                                                   "wap-wsg-idm-ecid-wtls11",
-                                                   "wap-wsg-idm-ecid-wtls12",
-                                                   "brainpoolP160r1",
-                                                   "brainpoolP160t1",
-                                                   "brainpoolP192r1",
-                                                   "brainpoolP192t1",
-                                                   "brainpoolP224r1",
-                                                   "brainpoolP224t1",
-                                                   "brainpoolP256r1",
-                                                   "brainpoolP256t1",
-                                                   "brainpoolP320r1",
-                                                   "brainpoolP320t1",
-                                                   "brainpoolP384r1",
-                                                   "brainpoolP384t1",
-                                                   "brainpoolP512r1",
-                                                   "brainpoolP512t1" */};
 
   /* ================== Enrolement step Start ================== */
 
 #pragma region Setup Enrolement Step
 
-  ASSIGN_OR_EXIT(auto const buffer_setup_b64,
-                 create_commitment_setup("password", curve_names_selected));
+  auto const salt = crypto::generate_random_string(5);
+
+  ASSIGN_OR_EXIT(
+      auto const buffer_setup_b64,
+      create_commitment_setup("password", random_curves_selections(3), salt));
   // The Prover send to the verifer the postulate and the commitments (in
   // enrolement process) The Verifier generate the transient challenge and
   // send it to the prover
@@ -1303,7 +1330,6 @@ auto main(int argc, const char **argv) -> int {
 
   ASSIGN_OR_EXIT(auto const proof_hex,
                  crypto::solve_challenge("password", proving_form_b64))
-
 #pragma region Solving Step
 
   // DEBUG
