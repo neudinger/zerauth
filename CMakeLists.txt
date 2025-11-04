@@ -9,12 +9,10 @@ option(CMAKE_INCLUDE_CURRENT_DIR "CMAKE_INCLUDE_CURRENT_DIR" ON)
 set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
 set(BUILD_SHARED_LIBS OFF)
 
-if("$ENV{zerauth_version}" STREQUAL "")
-  message(WARNING "Setup zerauth_version in your environment variable")
-  set(zerauth_version "0.0.0.0")
-else()
-  set(zerauth_version $ENV{zerauth_version})
-endif("$ENV{zerauth_version}" STREQUAL "")
+# if("$ENV{zerauth_version}" STREQUAL "") message(WARNING "Setup zerauth_version
+# in your environment variable") set(zerauth_version "0.0.0.0") else()
+# set(zerauth_version $ENV{zerauth_version}) endif("$ENV{zerauth_version}"
+# STREQUAL "")
 
 project(
   zerauth
@@ -29,6 +27,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL Emscripten)
+  set(CMAKE_EXECUTABLE_SUFFIX .js)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
@@ -58,7 +60,7 @@ if(CCACHE)
   set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
 endif(CCACHE)
 
-find_package(OpenSSL 3.5.2 REQUIRED)
+# find_package(OpenSSL 3.5.2 REQUIRED)
 find_package(Threads REQUIRED)
 
 set(ROOT_DIR ${CMAKE_SOURCE_DIR})
@@ -164,18 +166,45 @@ add_custom_target(
 # -Wformat=2 -Wformat-truncation -Wundef -fno-common -Wno-unknown-pragmas
 # -Wno-attributes -Wno-unknown-attributes -Wno-conversion)
 
+include_directories(${PROJECT_NAME} /usr/local/include/
+                    /usr/local/openssl/include/)
 include_directories(${PROJECT_NAME} ${SRC_PATH}/flatbuffer)
 target_link_directories(${PROJECT_NAME} PRIVATE "/opt/lib/")
 target_link_directories(${PROJECT_NAME} PRIVATE "/usr/local/lib/")
+
+set_target_properties(
+  ${PROJECT_NAME}
+  PROPERTIES
+    LINKER_LANGUAGE CXX
+    LINK_FLAGS
+    "-s EXPORT_NAME='${PROJECT_NAME}' -s MODULARIZE=1 -s ALLOW_TABLE_GROWTH -s WASM=1"
+    # An executable target is often required to produce a .wasm + .js
+    OUTPUT_NAME ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC ON
                                                  LINK_SEARCH_END_STATIC ON)
 
-target_link_libraries(${PROJECT_NAME} ssl.a crypto.a flatbuffers.a)
-target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc"
-                    "-static-libstdc++")
+# if(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
 
-target_compile_features(${PROJECT_NAME} PRIVATE cxx_constexpr)
-target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_${CMAKE_CXX_STANDARD})
+target_include_directories(
+  ${PROJECT_NAME} BEFORE
+  PUBLIC "/usr/local/wasm/include/"
+         "/opt/share/emsdk/upstream/emscripten/system/include/")
+target_link_directories(${PROJECT_NAME} BEFORE PUBLIC "/usr/local/wasm/lib/")
+
+# else(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
+# endif(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
+
+# add_library(${PROJECT_NAME}_lib STATIC ${PROJECT_NAME}.cpp)
+
+# flatbuffers.a ssl.a crypto.a
+target_link_libraries(${PROJECT_NAME} embind
+                      /usr/local/wasm/openssl/lib/libcrypto.a)
+# target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc"
+# "-static-libstdc++")
+
+# https://cmake.org/cmake/help/latest/prop_gbl/CMAKE_CXX_KNOWN_FEATURES.html
+target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_${CMAKE_CXX_STANDARD}
+                                                cxx_constexpr cxx_decltype)
 
 foreach(FLATBUF_DEP IN LISTS FLATBUF_DEPS)
   add_dependencies(${TARGET_NAME} ${FLATBUF_DEP})

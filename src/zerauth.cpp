@@ -47,8 +47,14 @@
 #include <span>
 #include <type_traits>
 
-namespace crypto {
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+// #include <GLES3/gl3.h>
+#include <emscripten/bind.h>
+#else
+#endif
 
+namespace crypto {
 #define XSTR(s) STR(s)
 #define STR(s) #s
 
@@ -71,7 +77,7 @@ namespace crypto {
   }
 
 #define UNEXPECTED_IF(condition, msg)                                     \
-  if (condition) {                                                        \
+  if (condition) [[unlikely]] {                                           \
     return std::unexpected(std::format("({}): ({})", __FUNCTION__, msg)); \
   }
 
@@ -303,25 +309,32 @@ auto hex_to_EC_POINT(EC_GROUP_unique_ptr const &group,
 auto get_ec_group_by_curves_name(std::string const &curve_name)
     -> std::expected<EC_GROUP_unique_ptr, std::string> {
   auto const curve_nid = OBJ_sn2nid(curve_name.c_str());
+
   UNEXPECTED_IF(curve_nid == NID_undef,
+
                 std::format("Can not find the nid of ({})", curve_name))
+
   EC_GROUP_unique_ptr ec_group_unique_ptr{EC_GROUP_new_by_curve_name(curve_nid),
                                           ::EC_GROUP_free};
   OSSL_CHECK_NULL_OR_UNEXPECTED(
       ec_group_unique_ptr,
       std::format("Can not create group for the nid : ({}) : ", curve_nid));
+
   return ec_group_unique_ptr;
 }
 
 auto get_ec_groups_by_curves_names(std::vector<std::string> const &curves_name)
     -> std::expected<std::vector<EC_GROUP_unique_ptr>, std::string> {
   std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
+
   ec_group_by_curves_name.reserve(curves_name.size());
+
   for (auto const &curve_name : curves_name) {
     ASSIGN_OR_UNEXPECTED(auto ec_group_unique_ptr,
                          get_ec_group_by_curves_name(curve_name));
     ec_group_by_curves_name.emplace_back(std::move(ec_group_unique_ptr));
   }
+
   return ec_group_by_curves_name;
 }
 
@@ -330,14 +343,19 @@ auto get_ec_groups_by_curves_names(
         ::flatbuffers::Offset<::flatbuffers::String>> const *const curves_name)
     -> std::expected<std::vector<EC_GROUP_unique_ptr>, std::string> {
   std::vector<EC_GROUP_unique_ptr> ec_group_by_curves_name;
+
   UNEXPECTED_IF(curves_name == nullptr or curves_name->empty(),
                 "curves_name is null or empty")
+
   ec_group_by_curves_name.reserve(curves_name->size());
+
   for (auto const *const curve_name : *curves_name) {
     ASSIGN_OR_UNEXPECTED(auto ec_group_unique_ptr,
                          get_ec_group_by_curves_name(curve_name->str()));
+
     ec_group_by_curves_name.emplace_back(std::move(ec_group_unique_ptr));
   }
+
   return ec_group_by_curves_name;
 }
 
@@ -384,9 +402,7 @@ auto base64Encode(std::span<uint8_t const> const &input) noexcept
     -> std::expected<std::string, std::string> {
   std::string outbuffer;
 
-  if (input.size() == 0U) [[unlikely]] {
-    return std::unexpected("base64Encode input: input is empty");
-  };
+  UNEXPECTED_IF(input.size() == 0U, "base64Encode input: input is empty")
 
   uint64_t const encoded_size{4UL * ((input.size() + 2UL) / 3UL)};
   outbuffer.resize(encoded_size, '\0');
@@ -395,12 +411,12 @@ auto base64Encode(std::span<uint8_t const> const &input) noexcept
       std::invoke_result_t<decltype(&EVP_EncodeBlock), unsigned char *,
                            const unsigned char *, int>;
 
-  if (EVP_EncodeBlock(reinterpret_cast<uint8_t *>(outbuffer.data()),
-                      reinterpret_cast<uint8_t const *>(input.data()),
-                      static_cast<int>(input.size())) not_eq
-      static_cast<EVP_EncodeBlock_rt>(encoded_size)) [[unlikely]] {
-    return std::unexpected("EVP_EncodeBlock not correctly encoded");
-  }
+  UNEXPECTED_IF(EVP_EncodeBlock(reinterpret_cast<uint8_t *>(outbuffer.data()),
+                                reinterpret_cast<uint8_t const *>(input.data()),
+                                static_cast<int>(input.size())) not_eq
+                    static_cast<EVP_EncodeBlock_rt>(encoded_size),
+                "EVP_EncodeBlock not correctly encoded")
+
   return outbuffer;
 }
 
@@ -567,6 +583,7 @@ auto new_ec_group_by_id_curve_name(int const &curve_nid)
   OSSL_CHECK_NULL_OR_UNEXPECTED(
       ec_group_unique_ptr,
       std::format("Cannot create group for the nid : {} : ", curve_nid));
+
   return ec_group_unique_ptr;
 }
 
@@ -575,10 +592,11 @@ template <StringLike StringType>
 auto new_ec_group_by_ln_curve_name(StringType const &curve_long_name)
     -> std::expected<EC_GROUP_unique_ptr const, std::string> {
   int const numerical_identifier{OBJ_ln2nid(curve_long_name)};
-  if (numerical_identifier == NID_undef) {
-    return std::unexpected(
-        std::format("{} is not a valid curve long name", curve_long_name));
-  }
+
+  UNEXPECTED_IF(
+      numerical_identifier == NID_undef,
+      std::format("{} is not a valid curve long name", curve_long_name))
+
   return new_ec_group_by_id_curve_name(numerical_identifier);
 }
 
@@ -587,10 +605,11 @@ template <StringLike StringType>
 auto new_ec_group_by_sn_curve_name(StringType const &curve_short_name)
     -> std::expected<EC_GROUP_unique_ptr const, std::string> {
   int const numerical_identifier{OBJ_sn2nid(curve_short_name)};
-  if (numerical_identifier == NID_undef) {
-    return std::unexpected(
-        std::format("{} is not a valid curve short name.", curve_short_name));
-  }
+
+  UNEXPECTED_IF(
+      numerical_identifier == NID_undef,
+      std::format("{} is not a valid curve short name.", curve_short_name))
+
   return new_ec_group_by_id_curve_name(numerical_identifier);
 }
 
@@ -625,9 +644,10 @@ auto generate_random_point(EC_GROUP_unique_ptr const &group)
 
   std::expected<BN_unique_ptr const, std::string> const expected_random_scalar{
       generate_random_group_scalar(group)};
-  if (not expected_random_scalar.has_value()) {
-    return std::unexpected(expected_random_scalar.error());
-  }
+
+  UNEXPECTED_IF(not expected_random_scalar.has_value(),
+                expected_random_scalar.error())
+
   auto &&random_scalar = std::move(expected_random_scalar.value());
   BIGNUM const *const order{EC_GROUP_get0_order(group.get())};
   OSSL_CHECK_NULL_OR_UNEXPECTED(order, "Cannot get order of the curent group ")
@@ -649,9 +669,10 @@ auto generate_random_points_from(
 
   for (auto const &ec_group : ec_groups) {
     auto random_point_expected = generate_random_point(ec_group);
-    if (not random_point_expected.has_value()) {
-      return std::unexpected(random_point_expected.error());
-    }
+
+    UNEXPECTED_IF(not random_point_expected.has_value(),
+                  random_point_expected.error())
+
     ec_groups_points.emplace_back(std::move(random_point_expected.value()));
   }
 
@@ -741,6 +762,7 @@ auto generate_transient_challenge(
   OSSL_CHECK_OR_UNEXPECTED(BN_div(order_mean.get(), nullptr, order_mean.get(),
                                   order_length.get(), bn_ctx.get()),
                            "Bad execution of BN_div ");
+
   BN_unique_ptr nonce{BN_unique_ptr(BN_new(), ::BN_free)};
   OSSL_CHECK_OR_UNEXPECTED(BN_rand_range(nonce.get(), order_mean.get()),
                            "Bad execution of BN_rand_range ")
@@ -779,9 +801,8 @@ auto generate_challenge(
        std::ranges::views::zip(ec_groups, commitments, transient_points)) {
     auto size = EC_POINT_point2buf(group.get(), commitment.get(),
                                    POINT_CONVERSION_COMPRESSED, &buf, nullptr);
-    if (size <= 0) {
-      return std::unexpected("Can not extract the buffer from point");
-    }
+
+    UNEXPECTED_IF(size <= 0, "Can not extract the buffer from point")
 
     OSSL_CHECK_OR_UNEXPECTED(EVP_DigestUpdate(mdctx.get(), buf, size),
                              "ERROR: EVP_DigestUpdate")
@@ -790,9 +811,8 @@ auto generate_challenge(
 
     size = EC_POINT_point2buf(group.get(), transient_point.get(),
                               POINT_CONVERSION_COMPRESSED, &buf, nullptr);
-    if (size <= 0) {
-      return std::unexpected("Can not extract the buffer from point");
-    }
+
+    UNEXPECTED_IF(size <= 0, "Can not extract the buffer from point")
 
     OSSL_CHECK_OR_UNEXPECTED(EVP_DigestUpdate(mdctx.get(), buf, size),
                              "ERROR: EVP_DigestUpdate")
@@ -1261,6 +1281,103 @@ auto random_curves_selections(size_t const &size) -> std::vector<std::string> {
 
 // https://github.com/sdiehl/schnorr-nizk
 // https://docs.zkproof.org/pages/standards/accepted-workshop4/proposal-sigma.pdf
+
+#ifdef __EMSCRIPTEN__
+
+using ExpectedStringResult = struct ExpectedStringResult {
+  bool is_success;
+  std::string value;
+  std::string error;
+};
+
+auto create_commitment_setup_js(
+    std::string const &secret,
+    std::vector<std::string> const &curve_names_selected,
+    std::string const &salt = "") -> ExpectedStringResult {
+  auto const result_or_error =
+      create_commitment_setup(secret, curve_names_selected, salt);
+  return ExpectedStringResult{.is_success = result_or_error.has_value(),
+                              .value = result_or_error.value_or(""),
+                              .error = result_or_error.error_or("")};
+}
+
+auto solve_challenge_js(std::string const &secret,
+                        std::string const &proving_form_b64)
+    -> ExpectedStringResult {
+  auto const result_or_error =
+      crypto::solve_challenge(secret, proving_form_b64);
+  return ExpectedStringResult{.is_success = result_or_error.has_value(),
+                              .value = result_or_error.value_or(""),
+                              .error = result_or_error.error_or("")};
+}
+
+using ExpectedBoolResult = struct ExpectedBoolResult {
+  bool is_success;
+  bool value;
+  std::string error;
+};
+
+auto verify_js(std::string const &proof_hex,
+               std::string const &transient_parameter_b64)
+    -> ExpectedBoolResult {
+  auto const result_or_error =
+      crypto::verify(proof_hex, transient_parameter_b64);
+  return ExpectedBoolResult{.is_success = result_or_error.has_value(),
+                            .value = result_or_error.value_or(false),
+                            .error = result_or_error.error_or("")};
+}
+
+using StringPair = struct StringPair {
+  std::string first;
+  std::string second;
+};
+
+using ExpectedTupleStringResult = struct ExpectedTupleStringResult {
+  bool is_success;
+  StringPair value;
+  std::string error;
+};
+
+auto create_challenge_js(std::string const &buffer_setup_b64)
+    -> ExpectedTupleStringResult {
+  auto const result_or_error = create_challenge(buffer_setup_b64);
+  auto const [first, second] =
+      result_or_error.value_or(std::make_tuple("", ""));
+  return ExpectedTupleStringResult{
+      .is_success = result_or_error.has_value(),
+      .value = StringPair{.first = first, .second = second},
+      .error = result_or_error.error_or("")};
+}
+
+// Embind allows you to expose C++ functions to JavaScript
+EMSCRIPTEN_BINDINGS(my_module) {
+  emscripten::value_object<StringPair>("StringPair")
+      .field("first", &StringPair::first)
+      .field("second", &StringPair::second);
+  emscripten::value_object<ExpectedBoolResult>("ExpectedResult")
+      .field("isSuccess", &ExpectedBoolResult::is_success)
+      .field("value", &ExpectedBoolResult::value)
+      .field("error", &ExpectedBoolResult::error);
+  emscripten::value_object<ExpectedStringResult>("ExpectedResult")
+      .field("isSuccess", &ExpectedStringResult::is_success)
+      .field("value", &ExpectedStringResult::value)
+      .field("error", &ExpectedStringResult::error);
+  emscripten::value_object<ExpectedTupleStringResult>(
+      "ExpectedTupleStringResult")
+      .field("isSuccess", &ExpectedTupleStringResult::is_success)
+      .field("value", &ExpectedTupleStringResult::value)
+      .field("error", &ExpectedTupleStringResult::error);
+  emscripten::function("generate_random_string",
+                       &crypto::generate_random_string);
+  emscripten::register_vector<std::string>("StringVector");
+  emscripten::function("random_curves_selections", &random_curves_selections);
+  emscripten::function("create_commitment_setup", &create_commitment_setup_js);
+  emscripten::function("create_challenge", &create_challenge_js);
+  emscripten::function("solve_challenge", &solve_challenge_js);
+  emscripten::function("verify", &verify_js);
+}
+#else
+
 auto main(int argc, const char **argv) -> int {
   //  openssl ecparam -list_curves
 
@@ -1281,7 +1398,8 @@ auto main(int argc, const char **argv) -> int {
 
   // Alice ask bob to prove that she knows the password, so bob generate the
   // transient challenge (transient_points) based on the
-  // postulate_random_points placed on ther respective eliptic curve group and
+  // postulate_random_points placed on ther respective eliptic curve group
+  // and
   // send the transient nonce to Alice
 #pragma region Challenge Step
   // DEBUG
@@ -1350,3 +1468,4 @@ auto main(int argc, const char **argv) -> int {
 
   return 0;
 }
+#endif

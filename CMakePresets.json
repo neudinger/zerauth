@@ -35,6 +35,26 @@
             }
         },
         {
+            "name": "wasm",
+            "hidden": false,
+            "displayName": "Emscripten",
+            "binaryDir": "${sourceDir}/build_${presetName}-mchub",
+            "environment": {
+                "CXX": "em++",
+                "CC": "emcc",
+                "AR": "emar",
+                "RANLIB": "emranlib"
+            },
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist_${presetName}",
+                "FlatBuffers_DIR": "/usr/local/lib/cmake/flatbuffers",
+                "OPENSSL_ROOT_DIR": "/usr/local/wasm/openssl/",
+                "OPENSSL_LIBRARIES": "/usr/local/wasm/openssl/lib/"
+            },
+            "toolchainFile": "/opt/share/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+        },
+        {
             "name": "Debug",
             "displayName": "Debug Build",
             "hidden": false,
@@ -71,6 +91,14 @@
             "name": "Base",
             "hidden": true,
             "jobs": 8,
+            "targets": [
+                "zerauth"
+            ]
+        },
+        {
+            "name": "wasm",
+            "hidden": false,
+            "configurePreset": "wasm",
             "targets": [
                 "zerauth"
             ]
