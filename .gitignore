@@ -91,3 +91,4 @@ infer-out/
 cppcheck_report.txt
 tmp/
 old-bin/
+.tests/

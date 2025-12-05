@@ -1,4 +1,4 @@
-// Setup (Enrolement) phase of the sigma protocol
+// Setup (Enrollment) phase of the sigma protocol
 namespace zerauth;
 
 table Setup {

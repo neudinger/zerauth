@@ -17,7 +17,6 @@
             },
             "description": "Base CMake configurations",
             "cacheVariables": {
-                "DEBUG_CMAKE": "ON",
                 "USE_STATIC_LIBS": "ON",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_LINK_WHAT_YOU_USE": "OFF",
@@ -25,20 +24,18 @@
                 "FETCHCONTENT_QUIET": "OFF",
                 "LTO": "ON",
                 "CCACHE": "ON",
-                "OPENSSL_ROOT_DIR": "/usr/local/openssl",
-                "OPENSSL_LIBRARIES": "/usr/local/openssl/lib/",
                 "CPACK_OUTPUT_FILE_PREFIX": "${sourceDir}/dist",
                 "CPACK_PACKAGING_INSTALL_PREFIX": "/opt/",
                 "LINK_JOB_POOLS": "2",
-                "CPACK_DEBIAN_COMPRESSION_TYPE": "bzip2",
-                "_CMAKE_CXX_INCLUDE_WHAT_YOU_USE": "include-what-you-use"
+                "CPACK_DEBIAN_COMPRESSION_TYPE": "zstd",
+                "CMAKE_CXX_INCLUDE_WHAT_YOU_USE": "include-what-you-use"
             }
         },
         {
             "name": "wasm",
             "hidden": false,
             "displayName": "Emscripten",
-            "binaryDir": "${sourceDir}/build_${presetName}-mchub",
+            "binaryDir": "${sourceDir}/build_${presetName}-zerauth",
             "environment": {
                 "CXX": "em++",
                 "CC": "emcc",
@@ -62,12 +59,14 @@
                 "Base"
             ],
             "description": "Sets up a Debug build that uses the default compiler and generator",
-            "binaryDir": "${sourceDir}/build_${presetName}-mchub",
+            "binaryDir": "${sourceDir}/build_${presetName}-zerauth",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "${presetName}",
                 "BUILD_DOCUMENTATION": "OFF",
                 "FETCHCONTENT_BASE_DIR": "${sourceDir}/.external_${presetName}",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist_${presetName}"
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist_${presetName}",
+                "OPENSSL_ROOT_DIR": "/usr/local/openssl",
+                "OPENSSL_LIBRARIES": "/usr/local/openssl/lib/"
             }
         },
         {
@@ -82,7 +81,9 @@
                 "CMAKE_BUILD_TYPE": "${presetName}",
                 "BUILD_DOCUMENTATION": "OFF",
                 "FETCHCONTENT_BASE_DIR": "${sourceDir}/.external_${presetName}",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist_${presetName}/"
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist_${presetName}/",
+                "OPENSSL_ROOT_DIR": "/usr/local/openssl",
+                "OPENSSL_LIBRARIES": "/usr/local/openssl/lib/"
             }
         }
     ],
@@ -104,16 +105,16 @@
             ]
         },
         {
-            "name": "Debug",
-            "hidden": false,
-            "inherits": "Base",
-            "configurePreset": "Debug"
-        },
-        {
             "name": "Release",
             "hidden": false,
             "inherits": "Base",
             "configurePreset": "Release"
+        },
+        {
+            "name": "Debug",
+            "hidden": false,
+            "inherits": "Base",
+            "configurePreset": "Debug"
         }
     ]
 }

@@ -2,8 +2,6 @@ Checks: [
     performance*,
     modernize*,
     readability*,
-    # portability-*,
-    # zircon-*,
     bugprone-narrowing-conversions,
     -readability-function-cognitive-complexity,
   ]
@@ -20,9 +18,8 @@ ExtraArgsBefore:
     -I/usr/include/c++/14,
     -I/usr/local/include,
     -Wno-unknown-warning-option,
+    -Wall,
   ]
-  # -Wall,
-  # -Wno-deprecated-declarations,
 
 WarningsAsErrors: "*"
 HeaderFileExtensions: ["", "h", "hh", "hpp", "hxx"]

@@ -1,6 +1,6 @@
 # ================= Flatbuf Generation =================
 
-set(FLATBUFFER_GENERATED ${PROJECT_SOURCE_DIR}/src/flatbuffer)
+set(FLATBUFFER_GENERATED ${PROJECT_SOURCE_DIR}/src/flatbuffers)
 
 make_directory(${FLATBUFFER_GENERATED})
 

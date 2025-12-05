@@ -9,10 +9,12 @@ option(CMAKE_INCLUDE_CURRENT_DIR "CMAKE_INCLUDE_CURRENT_DIR" ON)
 set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
 set(BUILD_SHARED_LIBS OFF)
 
-# if("$ENV{zerauth_version}" STREQUAL "") message(WARNING "Setup zerauth_version
-# in your environment variable") set(zerauth_version "0.0.0.0") else()
-# set(zerauth_version $ENV{zerauth_version}) endif("$ENV{zerauth_version}"
-# STREQUAL "")
+if("$ENV{zerauth_version}" STREQUAL "")
+  message(WARNING "Setup zerauth_version in your environment variable")
+  set(zerauth_version "0.0.0.0")
+else()
+  set(zerauth_version $ENV{zerauth_version})
+endif("$ENV{zerauth_version}" STREQUAL "")
 
 project(
   zerauth
@@ -28,8 +30,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
-if(CMAKE_SYSTEM_NAME STREQUAL Emscripten)
+if(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
   set(CMAKE_EXECUTABLE_SUFFIX .js)
+  include_directories(${PROJECT_NAME} /usr/local/include/
+                      /usr/local/openssl/include/)
+  include_directories(${PROJECT_NAME} ${SRC_PATH}/flatbuffer)
+else()
+  find_package(OpenSSL 3.5.2 REQUIRED)
 endif()
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -52,15 +59,14 @@ find_program(CLANG_TIDY_EXE NAMES clang-tidy REQUIRED)
 find_program(CPP_LINT NAMES cpplint REQUIRED)
 find_program(INFER NAMES infer REQUIRED)
 find_program(PMD NAMES pmd REQUIRED)
-option(CCACHE "Activation of CCACHE" ON)
 find_program(FLATBUFFER_FLATC NAMES flatc)
 
+option(CCACHE "Activation of CCACHE" ON)
 if(CCACHE)
   find_program(CCACHE_PROGRAM NAMES ccache REQUIRED)
   set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
 endif(CCACHE)
 
-# find_package(OpenSSL 3.5.2 REQUIRED)
 find_package(Threads REQUIRED)
 
 set(ROOT_DIR ${CMAKE_SOURCE_DIR})
@@ -85,19 +91,22 @@ set(CLANG_TIDY_COMMAND ${CLANG_TIDY_EXE}
 
 # https://github.com/StableCoder/cmake-scripts/blob/main/tools.cmake
 # https://gist.github.com/bjornblissing/60c2d425532e6dd534841a8d1d2ffe76
+
 set(CPPCHECK_OPTS
-    --language=c++
-    --std=c++20
-    -D__cplusplus=202002L
-    --verbose
-    --enable=all
-    -I
-    /usr/local/include
-    --check-level=exhaustive
-    --suppress=unmatchedSuppression
-    --library=std
-    --library=posix
-    --inline-suppr # // cppcheck-suppress preprocessorErrorDirective
+    --language=c++,
+    --std=c++20,
+    -D__cplusplus=202002L,
+    --verbose,
+    --enable=all,
+    --include=/usr/local/include,
+    --include=./src/flatbuffers,
+    --check-level=exhaustive,
+    --suppress=unusedFunction,
+    --suppress=unmatchedSuppression,
+    --suppress=missingIncludeSystem,
+    --library=std,
+    --library=posix,
+    --inline-suppr # // cppcheck-suppress preprocessorErrorDirective,
     --cppcheck-build-dir=${CMAKE_CURRENT_BINARY_DIR}
     --suppressions-list=${CMAKE_CURRENT_SOURCE_DIR}/cppcheck-suppressions-list.txt
     --checkers-report=${CMAKE_CURRENT_BINARY_DIR}/cppcheck_report.txt
@@ -114,7 +123,8 @@ add_custom_command(
   COMMENT "Running Cppcheck static analysis"
   VERBATIM)
 
-# add_custom_target(cppcheck ALL DEPENDS CPPCHECK)
+add_custom_target(cppcheck ALL DEPENDS CPPCHECK)
+add_dependencies(${PROJECT_NAME} cppcheck)
 
 add_custom_target(
   clang_format
@@ -122,6 +132,8 @@ add_custom_target(
     ${CLANG_FORMAT} --Werror --verbose
     --style=file:${CMAKE_CURRENT_LIST_DIR}/.clang-format -i ${SRCS}
     ${PROTOS_SERVICES_IMPL_SRCS})
+
+add_dependencies(${PROJECT_NAME} clang_format)
 
 add_custom_target(
   cpplint
@@ -131,6 +143,8 @@ add_custom_target(
     "${CPP_LINT} check passed."
   COMMENT "Running cpplint on source files..."
   VERBATIM)
+
+add_dependencies(${PROJECT_NAME} cpplint)
 
 # https://fbinfer.com/docs/man-infer-run/ --debug --debug-level 2
 
@@ -146,13 +160,16 @@ add_custom_target(
   COMMENT "Running infer on source files..."
   VERBATIM)
 
+# add_custom_target(cpd COMMAND ${PMD} cpd --verbose --minimum-tokens 200
+# --language cpp --file-list ${SRCS})
+
+# add_dependencies(${PROJECT_NAME} cpd)
+
 # set_target_properties(${PROJECT_NAME} PROPERTIES CXX_CLANG_TIDY
 # "${CLANG_TIDY_COMMAND}")
-# add_custom_target(cpd COMMAND ${PMD} cpd --verbose --minimum-tokens 200
-# --language cpp --file-list ${SRCS}) add_dependencies(${PROJECT_NAME} cppcheck)
-# add_dependencies(${PROJECT_NAME} cpplint) add_dependencies(${PROJECT_NAME}
-# clang_format) add_dependencies(${PROJECT_NAME} infer)
-# add_dependencies(${PROJECT_NAME} cpd)
+# add_dependencies(${PROJECT_NAME} cppcheck) add_dependencies(${PROJECT_NAME}
+# cpplint) add_dependencies(${PROJECT_NAME} clang_format)
+# add_dependencies(${PROJECT_NAME} infer) add_dependencies(${PROJECT_NAME} cpd)
 
 # emcmake cmake -B build_add_lib && cmake --build build_add_lib emcc -O2 -s
 # WASM=1 -s SIDE_MODULE=1 -o add.wasm add.cpp emcc add.cpp -s
@@ -166,41 +183,31 @@ add_custom_target(
 # -Wformat=2 -Wformat-truncation -Wundef -fno-common -Wno-unknown-pragmas
 # -Wno-attributes -Wno-unknown-attributes -Wno-conversion)
 
-include_directories(${PROJECT_NAME} /usr/local/include/
-                    /usr/local/openssl/include/)
-include_directories(${PROJECT_NAME} ${SRC_PATH}/flatbuffer)
-target_link_directories(${PROJECT_NAME} PRIVATE "/opt/lib/")
-target_link_directories(${PROJECT_NAME} PRIVATE "/usr/local/lib/")
+# set_target_properties( ${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX
+# LINK_FLAGS "-s EXPORT_NAME='${PROJECT_NAME}' -s MODULARIZE=1 -s
+# ALLOW_TABLE_GROWTH -s WASM=1" # An executable target is often required to
+# produce a .wasm + .js OUTPUT_NAME ${PROJECT_NAME})
 
-set_target_properties(
-  ${PROJECT_NAME}
-  PROPERTIES
-    LINKER_LANGUAGE CXX
-    LINK_FLAGS
-    "-s EXPORT_NAME='${PROJECT_NAME}' -s MODULARIZE=1 -s ALLOW_TABLE_GROWTH -s WASM=1"
-    # An executable target is often required to produce a .wasm + .js
-    OUTPUT_NAME ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC ON
                                                  LINK_SEARCH_END_STATIC ON)
 
-# if(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
-
-target_include_directories(
-  ${PROJECT_NAME} BEFORE
-  PUBLIC "/usr/local/wasm/include/"
-         "/opt/share/emsdk/upstream/emscripten/system/include/")
-target_link_directories(${PROJECT_NAME} BEFORE PUBLIC "/usr/local/wasm/lib/")
-
-# else(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
-# endif(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
-
 # add_library(${PROJECT_NAME}_lib STATIC ${PROJECT_NAME}.cpp)
 
-# flatbuffers.a ssl.a crypto.a
-target_link_libraries(${PROJECT_NAME} embind
-                      /usr/local/wasm/openssl/lib/libcrypto.a)
-# target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc"
-# "-static-libstdc++")
+if(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
+  target_link_directories(${PROJECT_NAME} BEFORE PUBLIC "/usr/local/wasm/lib/")
+  target_include_directories(
+    ${PROJECT_NAME} BEFORE
+    PUBLIC "/usr/local/wasm/include/"
+           "/opt/share/emsdk/upstream/emscripten/system/include/")
+  target_link_libraries(${PROJECT_NAME} embind /usr/local/wasm/lib/libcrypto.a)
+else()
+  target_link_directories(${PROJECT_NAME} BEFORE PRIVATE "/opt/lib/")
+  target_link_directories(${PROJECT_NAME} BEFORE PRIVATE "/usr/local/lib/")
+  target_link_libraries(${PROJECT_NAME} flatbuffers.a crypto.a)
+endif()
+
+target_link_options(${PROJECT_NAME} BEFORE PRIVATE "-static-libgcc"
+                    "-static-libstdc++")
 
 # https://cmake.org/cmake/help/latest/prop_gbl/CMAKE_CXX_KNOWN_FEATURES.html
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_${CMAKE_CXX_STANDARD}
