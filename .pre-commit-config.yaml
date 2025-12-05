@@ -53,6 +53,7 @@ repos:
             -D__cplusplus=202002L,
             --verbose,
             --enable=all,
+            -I/usr/local/include,
             --include=/usr/local/include,
             --include=./src/flatbuffers,
             --check-level=exhaustive,

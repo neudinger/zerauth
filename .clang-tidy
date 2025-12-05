@@ -21,6 +21,7 @@ ExtraArgsBefore:
     -std=c++23,
     -std=gnu++2b
     -stdlib=libc++
+    -I/usr/local/include/,
     -I/usr/include/c++/13,
     -I/usr/include/c++/14,
     -I/usr/local/include,
