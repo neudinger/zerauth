@@ -1,0 +1,2 @@
+*:./src/flatbuffers/*
+*:/usr/local/include/*

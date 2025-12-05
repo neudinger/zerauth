@@ -2,10 +2,15 @@ Checks: [
     performance*,
     modernize*,
     readability*,
-    # portability-*,
-    # zircon-*,
-    bugprone-narrowing-conversions,
-    -readability-function-cognitive-complexity,
+    concurrency*,
+    clang-analyzer*,
+    hicpp*,
+    cert*,
+    google*,
+    bugprone*,
+    portability*,
+    cppcoreguidelines*,
+    clang-diagnostic*
   ]
 ExtraArgsBefore:
   [
@@ -16,22 +21,22 @@ ExtraArgsBefore:
     -std=c++23,
     -std=gnu++2b
     -stdlib=libc++
+    -I/usr/local/include/,
     -I/usr/include/c++/13,
     -I/usr/include/c++/14,
     -I/usr/local/include,
     -Wno-unknown-warning-option,
+    -Wall,
   ]
-  # -Wall,
-  # -Wno-deprecated-declarations,
 
 WarningsAsErrors: "*"
-HeaderFileExtensions: ["", "h", "hh", "hpp", "hxx"]
-ImplementationFileExtensions: ["c", "cc", "cpp", "cxx"]
+HeaderFileExtensions: ["", "h", "hh", "hpp", "hxx", "h++"]
+ImplementationFileExtensions: ["c", "cc", "cpp", "cxx", "c++]
 HeaderFilterRegex: "^(?!.*toml\\.hpp).*$"
 FormatStyle: Google
 InheritParentConfig: true
 User: neudinger
 UseColor: true
-SystemHeaders: false
+SystemHeaders: true
 CheckOptions:
   readability-identifier-naming.VariableCase: lower_case

@@ -1,53 +1,50 @@
-#include <sys/types.h>
+#include <concepts>  // for same_as
+#include <expected>  // for expected, unexpected
+#include <format>    // for format
+#include <ranges>    // for _Zip, zip, zip_view
+#include <span>      // for span
 
-#include <expected>
-#include <format>
-#include <ranges>
+#include <flatbuffers/buffer.h>                   // for GetRoot, Offset
+#include <flatbuffers/flatbuffer_builder.h>       // for FlatBufferBuilder
+#include <flatbuffers/idl.h>                      // for Parser, GenerateText
+#include <flatbuffers/proving_phase_generated.h>  // for Proving, CreateProving
+#include <flatbuffers/setup_phase_generated.h>    // for Setup, CreateSetup
+#include <flatbuffers/string.h>                   // for String
+#include <flatbuffers/transient_generated.h>      // for Transient, CreateTra...
+#include <flatbuffers/util.h>                     // for LoadFile
+#include <flatbuffers/vector.h>                   // for Vector
+#include <flatbuffers/verifier.h>                 // for Verifier
+#include <openssl/bn.h>                           // for BN_new, BN_free, BN_...
+#include <openssl/crypto.h>                       // for OPENSSL_secure_clear...
+#include <openssl/ec.h>                           // for EC_POINT_new, EC_POI...
+#include <openssl/err.h>                          // for ERR_error_string
+#include <openssl/evp.h>                          // for EVP_DigestUpdate
+#include <openssl/obj_mac.h>                      // for NID_undef
+#include <openssl/objects.h>                      // for OBJ_sn2nid, OBJ_nid2ln
+#include <openssl/sha.h>                          // for SHA256_DIGEST_LENGTH
+#include <openssl/types.h>                        // for BIGNUM, BN_CTX, EVP_MD
 
-#include <flatbuffers/buffer.h>
-#include <flatbuffers/flatbuffer_builder.h>
-#include <flatbuffers/flatbuffers.h>
-#include <flatbuffers/idl.h>
-#include <flatbuffers/reflection.h>
-#include <flatbuffers/util.h>
-#include <flatbuffers/verifier.h>
-#include <openssl/bn.h>
-#include <openssl/crypto.h>
-#include <openssl/ec.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/obj_mac.h>
-#include <openssl/pem.h>
-#include <openssl/rand.h>
-#include <openssl/sha.h>
-#include <openssl/types.h>
+#include <print>  // for println
 
-#include <print>
+#include <algorithm>         // for count, generate_n
+#include <cstdint>           // for uint8_t, uint64_t
+#include <cstdlib>           // for exit, size_t, free
+#include <cstring>           // for memcpy, strlen
+#include <initializer_list>  // for initializer_list, begin
+#include <iterator>          // for back_insert_iterator
+#include <memory>            // for unique_ptr, operator==
+#include <random>            // for random_device, unifo...
+#include <string>            // for basic_string, string
+#include <string_view>       // for string_view
+#include <tuple>             // for tuple, get, make_tuple
+#include <utility>           // for move
+#include <variant>           // for tuple
+#include <vector>            // for vector
 
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <iterator>
-#include <memory>
-#include <random>
-#include <string>
-#include <string_view>
-#include <tuple>
-#include <utility>
-#include <vector>
-
-#include <array>
-#include <flatbuffer/proving_phase_generated.h>
-#include <flatbuffer/setup_phase_generated.h>
-#include <flatbuffer/transient_generated.h>
-#include <span>
+#include <array>  // for array
 #include <type_traits>
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_BUILD__)
 #include <emscripten/emscripten.h>
 // #include <GLES3/gl3.h>
 #include <emscripten/bind.h>
@@ -95,7 +92,7 @@ namespace crypto {
 
 #define OSSL_ASSIGN_OR_UNEXPECTED_IMPL(result_name, definition, expression) \
   auto &&result_name = (expression);                                        \
-  if (not(result_name.has_value())) [[likely]] {                            \
+  if (not(result_name.has_value())) {                                       \
     return std::unexpected(std::format("{} {} : {}", __FUNCTION__,          \
                                        result_name.error(),                 \
                                        ERR_error_string(0, nullptr)));      \
@@ -108,7 +105,7 @@ namespace crypto {
 
 #define ASSIGN_OR_EXIT_IMPL(result_name, definition, expression) \
   auto &&result_name = (expression);                             \
-  if (not(result_name.has_value())) [[likely]] {                 \
+  if (not(result_name.has_value())) {                            \
     std::println("{}", result_name.error());                     \
     exit(1);                                                     \
   }                                                              \
@@ -233,9 +230,16 @@ template <crypto::VerifierRequest VerifierType>
 
   flatbuffers::Parser parser;
   parser.opts.indent_step = 2;  // pretty JSON
-  char const **paths_view = (char const **)(include_dirs.data());
+  // char const **paths_view = (char const **)(include_dirs.data());
 
-  UNEXPECTED_IF(not parser.Parse(schema_file.c_str(), paths_view),
+  auto c_include_dirs = include_dirs |
+                        std::views::transform([](auto const &data) -> auto {
+                          return data.c_str();
+                        }) |
+                        std::ranges::to<std::vector>();
+  c_include_dirs.push_back(nullptr);
+
+  UNEXPECTED_IF(not parser.Parse(schema_file.c_str(), c_include_dirs.data()),
                 std::format("Schema parse failed: -- {}", schema_file))
   UNEXPECTED_IF(parser.root_struct_def_ == nullptr,
                 "No root type defined in schema")
@@ -286,6 +290,8 @@ auto hex_to_BIGNUM(std::string const &hex_big_num)
     -> std::expected<BN_unique_ptr, std::string> {
   BN_unique_ptr big_number(BN_unique_ptr(BN_new(), ::BN_free));
 
+  OSSL_CHECK_NULL_OR_UNEXPECTED(big_number, "Cannot allocate BIGNUM")
+
   BIGNUM *ptr = big_number.get();
   OSSL_CHECK_OR_UNEXPECTED(BN_hex2bn(&ptr, hex_big_num.c_str()) not_eq 0,
                            "Cannot convert hexa string to BIG NUMBER");
@@ -311,7 +317,6 @@ auto get_ec_group_by_curves_name(std::string const &curve_name)
   auto const curve_nid = OBJ_sn2nid(curve_name.c_str());
 
   UNEXPECTED_IF(curve_nid == NID_undef,
-
                 std::format("Can not find the nid of ({})", curve_name))
 
   EC_GROUP_unique_ptr ec_group_unique_ptr{EC_GROUP_new_by_curve_name(curve_nid),
@@ -429,15 +434,13 @@ struct [[nodiscard]] convert_to_impl<std::vector<std::string>> {
       flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>> const *const
           flat_buffers_vector) noexcept
       -> std::expected<std::vector<std::string>, std::string> {
-    std::vector<std::string> container;
-    if (flat_buffers_vector not_eq nullptr and
-        not flat_buffers_vector->empty()) {
-      container.reserve(flat_buffers_vector->size());
-      for (auto const *const element : *flat_buffers_vector) {
-        container.emplace_back(element->str());
-      }
+    if (flat_buffers_vector == nullptr) {
+      return std::vector<std::string>{};
     }
-    return container;
+    return *flat_buffers_vector |
+           std::views::transform(
+               [](auto const *element) -> auto { return element->str(); }) |
+           std::ranges::to<std::vector>();
   }
 };
 
@@ -482,7 +485,7 @@ struct [[nodiscard]] convert_to_impl<std::vector<EC_POINT_unique_ptr>> {
 
     ec_points.reserve(flat_buffers_vector_groups_names->size());
 
-    for (auto const [group_name, postulate_random_point] :
+    for (auto const &[group_name, postulate_random_point] :
          std::ranges::views::zip(*flat_buffers_vector_groups_names,
                                  *flat_buffers_vector_points)) {
       ASSIGN_OR_UNEXPECTED(
@@ -518,7 +521,8 @@ template <typename DestType>
                                       flat_buffers_vector_points);
 }
 
-auto BIGNUM_to_dec(BN_unique_ptr const &bignumber)
+[[nodiscard("Must use the decimal string return value"), maybe_unused]]
+auto BIGNUM_to_dec(BN_unique_ptr const &bignumber) noexcept
     -> std::expected<std::string const, std::string> {
   OSSL_CHECK_NULL_OR_UNEXPECTED(bignumber,
                                 "BIGNUM_to_dec bignumber parameter is null")
@@ -532,7 +536,8 @@ auto BIGNUM_to_dec(BN_unique_ptr const &bignumber)
   return std::string{num_dec_str.get(), std::strlen(num_dec_str.get())};
 }
 
-auto BIGNUM_to_hex(BN_unique_ptr const &bignumber)
+[[nodiscard("Must use the hexadecimal string return value"), maybe_unused]]
+auto BIGNUM_to_hex(BN_unique_ptr const &bignumber) noexcept
     -> std::expected<std::string const, std::string> {
   CRYPTO_char_unique_ptr const num_hex_str{BN_bn2hex(bignumber.get()),
                                            crypto::crypto_char_free};
@@ -542,9 +547,12 @@ auto BIGNUM_to_hex(BN_unique_ptr const &bignumber)
   return std::string{num_hex_str.get(), std::strlen(num_hex_str.get())};
 }
 
+[[nodiscard("Must use the hexadecimal string return value")]]
 auto EC_POINT_to_hex(EC_GROUP_unique_ptr const &group,
-                     EC_POINT_unique_ptr const &point)
+                     EC_POINT_unique_ptr const &point) noexcept
     -> std::expected<std::string, std::string> {
+  OSSL_CHECK_NULL_OR_UNEXPECTED(group, "group parameter is null")
+  OSSL_CHECK_NULL_OR_UNEXPECTED(point, "point parameter is null")
   CRYPTO_char_unique_ptr const point_position_hex_str{
       EC_POINT_point2hex(group.get(), point.get(), POINT_CONVERSION_COMPRESSED,
                          nullptr),
@@ -556,23 +564,24 @@ auto EC_POINT_to_hex(EC_GROUP_unique_ptr const &group,
                      std::strlen(point_position_hex_str.get())};
 }
 
-auto EC_POINTS_to_hex(std::vector<EC_GROUP_unique_ptr> const &ec_groups,
-                      std::vector<EC_POINT_unique_ptr> const &ec_points)
+[[nodiscard("Must use the hexadecimal string array return value")]]
+auto EC_POINTS_to_hex(
+    std::vector<EC_GROUP_unique_ptr> const &ec_groups,
+    std::vector<EC_POINT_unique_ptr> const &ec_points) noexcept
     -> std::expected<std::vector<std::string>, std::string> {
   if (ec_groups.size() not_eq ec_points.size()) {
-    std::unexpected("ec_groups and ec_points do not have the same size");
+    return std::unexpected("ec_groups and ec_points do not have the same size");
   }
-  std::vector<std::string> point_hex;
-  point_hex.reserve(ec_groups.size());
+  std::vector<std::string> points_hex;
+  points_hex.reserve(ec_groups.size());
 
   for (auto const &[ec_group, ec_point] :
        std::ranges::views::zip(ec_groups, ec_points)) {
     OSSL_ASSIGN_OR_UNEXPECTED(auto ec_point_to_hex,
                               EC_POINT_to_hex(ec_group, ec_point))
-    point_hex.push_back(std::move(ec_point_to_hex));
+    points_hex.push_back(std::move(ec_point_to_hex));
   }
-
-  return point_hex;
+  return points_hex;
 }
 
 // short name in parameter
@@ -602,6 +611,7 @@ auto new_ec_group_by_ln_curve_name(StringType const &curve_long_name)
 
 // short name in parameter
 template <StringLike StringType>
+[[nodiscard("Must use the returned EC_GROUP_unique_ptr"), maybe_unused]]
 auto new_ec_group_by_sn_curve_name(StringType const &curve_short_name)
     -> std::expected<EC_GROUP_unique_ptr const, std::string> {
   int const numerical_identifier{OBJ_sn2nid(curve_short_name)};
@@ -650,7 +660,7 @@ auto generate_random_point(EC_GROUP_unique_ptr const &group)
 
   auto &&random_scalar = std::move(expected_random_scalar.value());
   BIGNUM const *const order{EC_GROUP_get0_order(group.get())};
-  OSSL_CHECK_NULL_OR_UNEXPECTED(order, "Cannot get order of the curent group ")
+  OSSL_CHECK_NULL_OR_UNEXPECTED(order, "Cannot get order of the current group ")
   OSSL_CHECK_OR_UNEXPECTED(BN_div(nullptr, random_scalar.get(),
                                   random_scalar.get(), order, ctx.get()),
                            "Cannot process div operation : ");
@@ -1029,7 +1039,7 @@ auto flat_buffer_build_proving_builder(std::string const &nonce_hex,
   return builder;
 }
 
-[[nodiscard]]
+[[nodiscard("Must use the returned list of curve names"), maybe_unused]]
 auto list_curve_name() noexcept
     -> std::expected<std::vector<std::string>, std::string> {
   std::vector<std::string> curve_names;
@@ -1171,118 +1181,102 @@ auto create_challenge(std::string const &commitment_setup_b64)
                          std::move(b64_buffer_transient));
 }
 
+static std::initializer_list<std::string_view> constexpr curve_names_possible{
+    std::string_view("secp112r1"),
+    std::string_view("secp112r2"),
+    std::string_view("secp128r1"),
+    std::string_view("secp128r2"),
+    std::string_view("secp160k1"),
+    std::string_view("secp160r1"),
+    std::string_view("secp160r2"),
+    std::string_view("secp192k1"),
+    std::string_view("secp224k1"),
+    std::string_view("secp224r1"),
+    std::string_view("secp256k1"),
+    std::string_view("secp384r1"),
+    std::string_view("secp521r1"),
+    std::string_view("prime192v1"),
+    std::string_view("prime192v2"),
+    std::string_view("prime192v3"),
+    std::string_view("prime239v1"),
+    std::string_view("prime239v2"),
+    std::string_view("prime239v3"),
+    std::string_view("prime256v1"),
+    std::string_view("sect113r1"),
+    std::string_view("sect113r2"),
+    std::string_view("sect131r1"),
+    std::string_view("sect131r2"),
+    std::string_view("sect163k1"),
+    std::string_view("sect163r1"),
+    std::string_view("sect163r2"),
+    std::string_view("sect193r1"),
+    std::string_view("sect193r2"),
+    std::string_view("sect233k1"),
+    std::string_view("sect233r1"),
+    std::string_view("sect239k1"),
+    std::string_view("sect283k1"),
+    std::string_view("sect283r1"),
+    std::string_view("sect409k1"),
+    std::string_view("sect409r1"),
+    std::string_view("sect571k1"),
+    std::string_view("sect571r1"),
+    std::string_view("c2pnb163v1"),
+    std::string_view("c2pnb163v2"),
+    std::string_view("c2pnb163v3"),
+    std::string_view("c2pnb176v1"),
+    std::string_view("c2tnb191v1"),
+    std::string_view("c2tnb191v2"),
+    std::string_view("c2tnb191v3"),
+    std::string_view("c2pnb208w1"),
+    std::string_view("c2tnb239v1"),
+    std::string_view("c2tnb239v2"),
+    std::string_view("c2tnb239v3"),
+    std::string_view("c2pnb272w1"),
+    std::string_view("c2pnb304w1"),
+    std::string_view("c2tnb359v1"),
+    std::string_view("c2pnb368w1"),
+    std::string_view("c2tnb431r1"),
+    std::string_view("wap-wsg-idm-ecid-wtls1"),
+    std::string_view("wap-wsg-idm-ecid-wtls3"),
+    std::string_view("wap-wsg-idm-ecid-wtls4"),
+    std::string_view("wap-wsg-idm-ecid-wtls5"),
+    std::string_view("wap-wsg-idm-ecid-wtls6"),
+    std::string_view("wap-wsg-idm-ecid-wtls7"),
+    std::string_view("wap-wsg-idm-ecid-wtls8"),
+    std::string_view("wap-wsg-idm-ecid-wtls9"),
+    std::string_view("wap-wsg-idm-ecid-wtls10"),
+    std::string_view("wap-wsg-idm-ecid-wtls11"),
+    std::string_view("wap-wsg-idm-ecid-wtls12"),
+    std::string_view("brainpoolP160r1"),
+    std::string_view("brainpoolP160t1"),
+    std::string_view("brainpoolP192r1"),
+    std::string_view("brainpoolP192t1"),
+    std::string_view("brainpoolP224r1"),
+    std::string_view("brainpoolP224t1"),
+    std::string_view("brainpoolP256r1"),
+    std::string_view("brainpoolP256t1"),
+    std::string_view("brainpoolP320r1"),
+    std::string_view("brainpoolP320t1"),
+    std::string_view("brainpoolP384r1"),
+    std::string_view("brainpoolP384t1"),
+    std::string_view("brainpoolP512r1"),
+    std::string_view("brainpoolP512t1")};
+
 auto random_curves_selections(size_t const &size) -> std::vector<std::string> {
-  std::vector<std::string> curve_names_selected;
+  std::vector<std::string_view> curve_names_selected;
   curve_names_selected.reserve(size);
-  std::vector<std::string> const curve_names_possible{"secp112r1",
-                                                      "secp112r2",
-                                                      "secp128r1",
-                                                      "secp128r2",
-                                                      "secp160k1",
-                                                      "secp160r1",
-                                                      "secp160r2",
-                                                      "secp192k1",
-                                                      "secp224k1",
-                                                      "secp224r1",
-                                                      "secp256k1",
-                                                      "secp384r1",
-                                                      "secp521r1",
-                                                      "prime192v1",
-                                                      "prime192v2",
-                                                      "prime192v3",
-                                                      "prime239v1",
-                                                      "prime239v2",
-                                                      "prime239v3",
-                                                      "prime256v1",
-                                                      "sect113r1",
-                                                      "sect113r2",
-                                                      "sect131r1",
-                                                      "sect131r2",
-                                                      "sect163k1",
-                                                      "sect163r1",
-                                                      "sect163r2",
-                                                      "sect193r1",
-                                                      "sect193r2",
-                                                      "sect233k1",
-                                                      "sect233r1",
-                                                      "sect239k1",
-                                                      "sect283k1",
-                                                      "sect283r1",
-                                                      "sect409k1",
-                                                      "sect409r1",
-                                                      "sect571k1",
-                                                      "sect571r1",
-                                                      "c2pnb163v1",
-                                                      "c2pnb163v2",
-                                                      "c2pnb163v3",
-                                                      "c2pnb176v1",
-                                                      "c2tnb191v1",
-                                                      "c2tnb191v2",
-                                                      "c2tnb191v3",
-                                                      "c2pnb208w1",
-                                                      "c2tnb239v1",
-                                                      "c2tnb239v2",
-                                                      "c2tnb239v3",
-                                                      "c2pnb272w1",
-                                                      "c2pnb304w1",
-                                                      "c2tnb359v1",
-                                                      "c2pnb368w1",
-                                                      "c2tnb431r1",
-                                                      "wap-wsg-idm-ecid-wtls1",
-                                                      "wap-wsg-idm-ecid-wtls3",
-                                                      "wap-wsg-idm-ecid-wtls4",
-                                                      "wap-wsg-idm-ecid-wtls5",
-                                                      "wap-wsg-idm-ecid-wtls6",
-                                                      "wap-wsg-idm-ecid-wtls7",
-                                                      "wap-wsg-idm-ecid-wtls8",
-                                                      "wap-wsg-idm-ecid-wtls9",
-                                                      "wap-wsg-idm-ecid-wtls10",
-                                                      "wap-wsg-idm-ecid-wtls11",
-                                                      "wap-wsg-idm-ecid-wtls12",
-                                                      "brainpoolP160r1",
-                                                      "brainpoolP160t1",
-                                                      "brainpoolP192r1",
-                                                      "brainpoolP192t1",
-                                                      "brainpoolP224r1",
-                                                      "brainpoolP224t1",
-                                                      "brainpoolP256r1",
-                                                      "brainpoolP256t1",
-                                                      "brainpoolP320r1",
-                                                      "brainpoolP320t1",
-                                                      "brainpoolP384r1",
-                                                      "brainpoolP384t1",
-                                                      "brainpoolP512r1",
-                                                      "brainpoolP512t1"};
 
   std::random_device random_device;
   std::default_random_engine generator(random_device());
 
   std::ranges::sample(curve_names_possible.begin(), curve_names_possible.end(),
                       std::back_inserter(curve_names_selected),
-                      static_cast<long>(size), generator);
+                      static_cast<int64_t>(size), generator);
 
-  return curve_names_selected;
+  return {curve_names_selected.begin(), curve_names_selected.end()};
 }
 
-//
-//  openssl ecparam
-// -list_curves
-
-// https://eprint.iacr.org/2022/1593.pdf
-// http://fc13.ifca.ai/proc/5-1.pdf
-// https://sebastiaagramunt.medium.com/discrete-logarithm-problem-and-diffie-hellman-key-exchange-821a45202d26
-
-// https://www.getmonero.org/resources/research-lab/pubs/MRL-0010.pdf
-// https://eprint.iacr.org/2022/1593.pdf
-
-// https://datatracker.ietf.org/doc/draft-hao-schnorr/05/
-// https://www.rfc-editor.org/rfc/pdfrfc/rfc8235.txt.pdf
-// https://asecuritysite.com/zero/dleq_z
-
-// https://github.com/sdiehl/schnorr-nizk
-// https://docs.zkproof.org/pages/standards/accepted-workshop4/proposal-sigma.pdf
-
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_BUILD__)
 
 using ExpectedStringResult = struct ExpectedStringResult {
   bool is_success;
@@ -1341,7 +1335,7 @@ using ExpectedTupleStringResult = struct ExpectedTupleStringResult {
 auto create_challenge_js(std::string const &buffer_setup_b64)
     -> ExpectedTupleStringResult {
   auto const result_or_error = create_challenge(buffer_setup_b64);
-  auto const [first, second] =
+  auto const &[first, second] =
       result_or_error.value_or(std::make_tuple("", ""));
   return ExpectedTupleStringResult{
       .is_success = result_or_error.has_value(),
@@ -1350,7 +1344,7 @@ auto create_challenge_js(std::string const &buffer_setup_b64)
 }
 
 // Embind allows you to expose C++ functions to JavaScript
-EMSCRIPTEN_BINDINGS(my_module) {
+EMSCRIPTEN_BINDINGS(Zerauth) {
   emscripten::value_object<StringPair>("StringPair")
       .field("first", &StringPair::first)
       .field("second", &StringPair::second);
@@ -1381,24 +1375,24 @@ EMSCRIPTEN_BINDINGS(my_module) {
 auto main(int argc, const char **argv) -> int {
   //  openssl ecparam -list_curves
 
-  /* ================== Enrolement step Start ================== */
+  /* ================== Enrollment step Start ================== */
 
-#pragma region Setup Enrolement Step
+#pragma region Setup Enrollment Step
 
   auto const salt = crypto::generate_random_string(8);
 
   ASSIGN_OR_EXIT(
       auto const buffer_setup_b64,
       create_commitment_setup("password", random_curves_selections(1), salt));
-  // The Prover send to the verifer the postulate and the commitments (in
-  // enrolement process) The Verifier generate the transient challenge and
+  // The Prover send to the verifier the postulate and the commitments (in
+  // enrollment process) The Verifier generate the transient challenge and
   // send it to the prover
 
-#pragma endregion Setup Enrolement Step
+#pragma endregion Setup Enrollment Step
 
   // Alice ask bob to prove that she knows the password, so bob generate the
   // transient challenge (transient_points) based on the
-  // postulate_random_points placed on ther respective eliptic curve group
+  // postulate_random_points placed on their respective elliptic curve group
   // and
   // send the transient nonce to Alice
 #pragma region Challenge Step
