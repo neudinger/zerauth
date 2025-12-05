@@ -94,3 +94,4 @@ old-bin/
 .tests/
 web/zerauth.js
 web/zerauth.wasm
+src/flatbuffers/*

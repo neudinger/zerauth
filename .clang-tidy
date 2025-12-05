@@ -31,7 +31,7 @@ ExtraArgsBefore:
 
 WarningsAsErrors: "*"
 HeaderFileExtensions: ["", "h", "hh", "hpp", "hxx", "h++"]
-ImplementationFileExtensions: ["c", "cc", "cpp", "cxx", "c++]
+ImplementationFileExtensions: ["c", "cc", "cpp", "cxx", "c++"]
 HeaderFilterRegex: "^(?!.*toml\\.hpp).*$"
 FormatStyle: Google
 InheritParentConfig: true
