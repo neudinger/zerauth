@@ -41,15 +41,8 @@ endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
-
-  # set(CMAKE_BUILD_TYPE RelWithDebInfo)
-
-  # remove_definitions(NDEBUG)
-
-  # add_compile_definitions(NDEBUG=1)
-
-  # set(CMAKE_BUILD_TYPE Release)
 endif(NOT CMAKE_BUILD_TYPE)
+
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
 find_package(FlatBuffers CONFIG REQUIRED)
@@ -92,20 +85,31 @@ set(CLANG_TIDY_COMMAND ${CLANG_TIDY_EXE}
 # https://github.com/StableCoder/cmake-scripts/blob/main/tools.cmake
 # https://gist.github.com/bjornblissing/60c2d425532e6dd534841a8d1d2ffe76
 
+add_custom_target(
+  compile_commands
+  COMMAND
+    ${CMAKE_COMMAND} -E echo "Running compile_commands..." && ln --symbolic
+    --force ${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json
+  COMMENT "Running compile_commands..."
+  VERBATIM)
+
+add_dependencies(${PROJECT_NAME} compile_commands)
+
 set(CPPCHECK_OPTS
-    --language=c++,
-    --std=c++20,
-    -D__cplusplus=202002L,
-    --verbose,
-    --enable=all,
-    --include=/usr/local/include,
-    --include=./src/flatbuffers,
-    --check-level=exhaustive,
-    --suppress=unusedFunction,
-    --suppress=unmatchedSuppression,
-    --suppress=missingIncludeSystem,
-    --library=std,
-    --library=posix,
+    --language=c++
+    --std=c++20
+    -D__cplusplus=202002L
+    --verbose
+    --enable=all
+    --include=/usr/local/include
+    --include=${CMAKE_CURRENT_SOURCE_DIR}/flatbuffers
+    --check-level=exhaustive
+    --suppress=unusedFunction
+    --suppress=unmatchedSuppression
+    --suppress=missingIncludeSystem
+    --library=std
+    --library=posix
     --inline-suppr # // cppcheck-suppress preprocessorErrorDirective,
     --cppcheck-build-dir=${CMAKE_CURRENT_BINARY_DIR}
     --suppressions-list=${CMAKE_CURRENT_SOURCE_DIR}/cppcheck-suppressions-list.txt

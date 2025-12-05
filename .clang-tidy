@@ -2,8 +2,15 @@ Checks: [
     performance*,
     modernize*,
     readability*,
-    bugprone-narrowing-conversions,
-    -readability-function-cognitive-complexity,
+    concurrency*,
+    clang-analyzer*,
+    hicpp*,
+    cert*,
+    google*,
+    bugprone*,
+    portability*,
+    cppcoreguidelines*,
+    clang-diagnostic*
   ]
 ExtraArgsBefore:
   [
