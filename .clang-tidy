@@ -1,4 +1,5 @@
-Checks: [
+Checks:
+  [
     performance*,
     modernize*,
     readability*,
@@ -7,10 +8,10 @@ Checks: [
     hicpp*,
     cert*,
     google*,
+    clang-diagnostic*,
     bugprone*,
     portability*,
     cppcoreguidelines*,
-    clang-diagnostic*
   ]
 ExtraArgsBefore:
   [
@@ -30,9 +31,8 @@ ExtraArgsBefore:
   ]
 
 WarningsAsErrors: "*"
-HeaderFileExtensions: ["", "h", "hh", "hpp", "hxx", "h++"]
-ImplementationFileExtensions: ["c", "cc", "cpp", "cxx", "c++"]
-HeaderFilterRegex: "^(?!.*toml\\.hpp).*$"
+HeaderFileExtensions: ["h", "hh", "hpp", "hxx"]
+ImplementationFileExtensions: ["c", "cc", "cpp", "cxx"]
 FormatStyle: Google
 InheritParentConfig: true
 User: neudinger

@@ -1,0 +1,17 @@
+    {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "type": "shell",
+                "label": "zerauth build",
+                "detail": "Build zerauth",
+                "command": "cmake --preset Debug && cmake --build --preset Debug",
+                "presentation": {
+                    "reveal": "silent",
+                    "close": true,
+                    "revealProblems": "onProblem",
+                    "panel": "new",
+                },
+            }
+        ]
+    }

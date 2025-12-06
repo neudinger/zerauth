@@ -26,9 +26,15 @@ Diagnostics:
         performance*,
         modernize*,
         readability*,
-        portability-*,
-        zircon-*,
-        bugprone-narrowing-conversions,
+        concurrency*,
+        clang-analyzer*,
+        hicpp*,
+        cert*,
+        google*,
+        clang-diagnostic*,
+        bugprone*,
+        portability*,
+        cppcoreguidelines*,
       ]
     Remove: [readability-function-cognitive-complexity]
     CheckOptions:

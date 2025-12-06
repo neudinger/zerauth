@@ -1,6 +1,6 @@
 {
     "recommendations": [
         "llvm-vs-code-extensions.vscode-clangd",
-        "bungcip.better-toml"
+        "kylinideteam.cppdebug"
     ]
 }

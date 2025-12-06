@@ -15,12 +15,6 @@ cmake --preset Debug && cmake --build --preset Debug
 ```
 
 
-```bash
-emsdk install latest
-emcmake cmake -B build_add_lib && cmake --build build_add_lib
-```
-
-
 ### Release
 
 ```bash

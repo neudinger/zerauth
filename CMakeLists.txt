@@ -31,6 +31,7 @@ set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 if(EMSCRIPTEN OR (CMAKE_CXX_COMPILER_ID STREQUAL "Emscripten"))
+  set(CMAKE_BUILD_TYPE Release)
   set(CMAKE_EXECUTABLE_SUFFIX .js)
   include_directories(${PROJECT_NAME} /usr/local/include/
                       /usr/local/openssl/include/)
@@ -184,6 +185,9 @@ add_custom_target(
   COMMENT "Running Copy/Paste Detector (CPD)")
 
 add_dependencies(${PROJECT_NAME} cpd)
+
+set_target_properties(${PROJECT_NAME} PROPERTIES CXX_CLANG_TIDY
+                                                 "${CLANG_TIDY_COMMAND}")
 
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC ON
                                                  LINK_SEARCH_END_STATIC ON)
