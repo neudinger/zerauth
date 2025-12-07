@@ -3,18 +3,17 @@ Zerauth().then((Zerauth) => {
     // Access the exported C++ function via the Module object
 
     const salt = Zerauth.generate_random_string(10);
+    console.log(`salt is ${salt}`);
+
     const random_selected_curve = Zerauth.random_curves_selections(2);
 
-    // 1. Get a reference to the C++ vector type wrapper
-    // const StringList = Zerauth.StringList;
-    // 2. Create a new C++ vector object in the WASM heap
-    // const manual_selected_curve = new StringList();
-    // manual_selected_curve.push_back("secp521r1");
-    // manual_selected_curve.push_back("prime256v1");
-    // manual_selected_curve.push_back("sect571r1");
-    // manual_selected_curve.push_back("c2tnb431r1");
-    // manual_selected_curve.push_back("wap-wsg-idm-ecid-wtls12");
-    // manual_selected_curve.push_back("brainpoolP512t1");
+    const manual_selected_curve = new Zerauth.StringList();
+    manual_selected_curve.push_back("secp521r1");
+    manual_selected_curve.push_back("prime256v1");
+    manual_selected_curve.push_back("sect571r1");
+    manual_selected_curve.push_back("c2tnb431r1");
+    manual_selected_curve.push_back("wap-wsg-idm-ecid-wtls12");
+    manual_selected_curve.push_back("brainpoolP512t1");
 
 
     for (let i = 0; i < random_selected_curve.size(); i++) {
@@ -23,9 +22,9 @@ Zerauth().then((Zerauth) => {
         console.log(`Item at index ${i}: ${str}`);
     }
 
-    const commitment_setup_b64_expected = Zerauth.create_commitment_setup("password", random_selected_curve, salt);
+    const commitment_setup_b64_expected = Zerauth.create_commitment_setup("password", manual_selected_curve, salt);
     random_selected_curve.delete();
-    // manual_selected_curve.delete();
+    manual_selected_curve.delete();
 
     if (commitment_setup_b64_expected.isSuccess) {
         // Success case: Access the value member

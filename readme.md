@@ -40,6 +40,10 @@ OR
 emcmake cmake --preset wasm && emcmake cmake --build --preset wasm
 ```
 
+```bash
+python3 -m http.server -d web/
+```
+
 ## Build Portable openssl static lib
 
 ```bash
