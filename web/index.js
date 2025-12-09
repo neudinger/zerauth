@@ -10,15 +10,16 @@ Zerauth().then((Zerauth) => {
     const manual_selected_curve = new Zerauth.StringList();
     manual_selected_curve.push_back("secp521r1");
     manual_selected_curve.push_back("prime256v1");
+    manual_selected_curve.push_back("secp256k1");
     manual_selected_curve.push_back("sect571r1");
     manual_selected_curve.push_back("c2tnb431r1");
     manual_selected_curve.push_back("wap-wsg-idm-ecid-wtls12");
     manual_selected_curve.push_back("brainpoolP512t1");
 
 
-    for (let i = 0; i < random_selected_curve.size(); i++) {
+    for (let i = 0; i < manual_selected_curve.size(); i++) {
         // Use .get(i) to retrieve the string at index i
-        const str = random_selected_curve.get(i);
+        const str = manual_selected_curve.get(i);
         console.log(`Item at index ${i}: ${str}`);
     }
 

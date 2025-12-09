@@ -151,7 +151,7 @@ auto test() -> int {
   auto const salt = crypto::generate_random_string(8);
 
   auto const buffer_setup_b64_or_error = crypto::create_commitment_setup(
-      "password", crypto::random_curves_selections(1), salt);
+      "password", crypto::random_curves_selections(3), salt);
 
   if (not buffer_setup_b64_or_error.has_value()) {
     std::println("Failed to create commitment setup");

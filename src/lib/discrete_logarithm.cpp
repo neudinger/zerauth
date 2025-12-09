@@ -107,7 +107,7 @@ template <crypto::VerifierRequest VerifierType>
   UNEXPECTED_IF(not VerifyBuffer<VerifierType>(verifier),
                 "VerifyBuffer verification failed")
 
-  std::string json;
+  std::string json{};
   auto const *const err =
       flatbuffers::GenerateText(parser, buffer.data(), &json);
 
@@ -195,6 +195,33 @@ auto base64Encode(std::span<uint8_t const> const &input) noexcept
       "EVP_EncodeBlock not correctly encoded")
 
   return outbuffer;
+}
+
+[[nodiscard]]
+auto hash_to_BIGNUM(std::vector<std::string> const &data) noexcept
+    -> std::expected<BN_unique_ptr, std::string> {
+  std::array<uint8_t, SHA256_DIGEST_LENGTH> hash{};
+  EVP_MD_CTX_unique_ptr const mdctx{EVP_MD_CTX_new(), ::EVP_MD_CTX_free};
+  EVP_MD_unique_ptr const evp_md{EVP_MD_fetch(nullptr, "SHA256", nullptr),
+                                 ::EVP_MD_free};
+
+  OSSL_CHECK_OR_UNEXPECTED(
+      EVP_DigestInit_ex(mdctx.get(), evp_md.get(), nullptr),
+      "hash_to_BIGNUM EVP_DigestInit_ex fail ");
+
+  for (auto const &secret : data) {
+    OSSL_CHECK_OR_UNEXPECTED(
+        EVP_DigestUpdate(mdctx.get(), secret.data(), secret.length()),
+        "hash_to_BIGNUM EVP_DigestUpdate fail ");
+  }
+
+  OSSL_CHECK_OR_UNEXPECTED(
+      EVP_DigestFinal_ex(mdctx.get(), hash.data(), nullptr),
+      "hash_to_BIGNUM EVP_DigestFinal_ex fail ");
+  BN_unique_ptr hash_number(
+      BN_bin2bn(hash.data(), SHA256_DIGEST_LENGTH, nullptr), ::BN_free);
+  OSSL_CHECK_NULL_OR_UNEXPECTED(mdctx, "hash_to_BIGNUM BN_bin2bn fail ")
+  return hash_number;
 }
 
 [[nodiscard("Must use the decimal string return value"), maybe_unused]]
@@ -450,33 +477,6 @@ auto generate_random_points_from(
 };
 
 [[nodiscard]]
-auto hash_to_BIGNUM(std::vector<std::string> const &data) noexcept
-    -> std::expected<BN_unique_ptr, std::string> {
-  std::array<uint8_t, SHA256_DIGEST_LENGTH> hash{};
-  EVP_MD_CTX_unique_ptr const mdctx{EVP_MD_CTX_new(), ::EVP_MD_CTX_free};
-  EVP_MD_unique_ptr const evp_md{EVP_MD_fetch(nullptr, "SHA256", nullptr),
-                                 ::EVP_MD_free};
-
-  OSSL_CHECK_OR_UNEXPECTED(
-      EVP_DigestInit_ex(mdctx.get(), evp_md.get(), nullptr),
-      "hash_to_BIGNUM EVP_DigestInit_ex fail ");
-
-  for (auto const &secret : data) {
-    OSSL_CHECK_OR_UNEXPECTED(
-        EVP_DigestUpdate(mdctx.get(), secret.data(), secret.length()),
-        "hash_to_BIGNUM EVP_DigestUpdate fail ");
-  }
-
-  OSSL_CHECK_OR_UNEXPECTED(
-      EVP_DigestFinal_ex(mdctx.get(), hash.data(), nullptr),
-      "hash_to_BIGNUM EVP_DigestFinal_ex fail ");
-  BN_unique_ptr hash_number(
-      BN_bin2bn(hash.data(), SHA256_DIGEST_LENGTH, nullptr), ::BN_free);
-  OSSL_CHECK_NULL_OR_UNEXPECTED(mdctx, "hash_to_BIGNUM BN_bin2bn fail ")
-  return hash_number;
-}
-
-[[nodiscard]]
 auto generate_commitment(
     std::vector<EC_GROUP_unique_ptr> const &ec_groups,
     std::vector<EC_POINT_unique_ptr> const &postulate_random_points,
@@ -513,31 +513,11 @@ auto generate_transient_challenge(
       "ec_groups and postulate_random_points do not have the same size")
 
   std::vector<EC_POINT_unique_ptr> transient_points;
-  BN_unique_ptr const order_mean{BN_unique_ptr(BN_new(), ::BN_free)};
-  BN_unique_ptr const order_length{BN_unique_ptr(BN_new(), ::BN_free)};
-  OSSL_CHECK_OR_UNEXPECTED(BN_set_word(order_length.get(), ec_groups.size()),
-                           "Bad execution of BN_set_word ");
-
-  for (auto const &[ec_group, postulate_random_point] :
-       std::ranges::views::zip(ec_groups, postulate_random_points)) {
-    BN_unique_ptr const nonce_group_number{BN_unique_ptr(BN_new(), ::BN_free)};
-    OSSL_CHECK_OR_UNEXPECTED(
-        EC_GROUP_get_order(ec_group.get(), nonce_group_number.get(), nullptr),
-        "ERROR EC_GROUP_get_order")
-    OSSL_CHECK_OR_UNEXPECTED(BN_add(order_mean.get(), nonce_group_number.get(),
-                                    nonce_group_number.get()),
-                             "ERROR BN_add");
-  }
-  BN_CTX_unique_ptr const bn_ctx{
-      BN_CTX_unique_ptr(BN_CTX_new(), ::BN_CTX_free)};
-
-  OSSL_CHECK_OR_UNEXPECTED(BN_div(order_mean.get(), nullptr, order_mean.get(),
-                                  order_length.get(), bn_ctx.get()),
-                           "Bad execution of BN_div ");
 
   BN_unique_ptr nonce{BN_unique_ptr(BN_new(), ::BN_free)};
-  OSSL_CHECK_OR_UNEXPECTED(BN_rand_range(nonce.get(), order_mean.get()),
-                           "Bad execution of BN_rand_range ")
+  OSSL_CHECK_OR_UNEXPECTED(
+      BN_rand(nonce.get(), 1024, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY),
+      "Bad execution of BN_rand");
 
   for (auto const &[ec_group, postulate_random_point] :
        std::ranges::views::zip(ec_groups, postulate_random_points)) {
