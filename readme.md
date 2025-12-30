@@ -207,47 +207,64 @@ wget -qO- \
 
 ## Zero-Knowledge Succinct Non-Interactive Argument of Knowledge (zkSNARK)
 
-### libfqfft
+Project on hold require offline MPC and the prover must hold a proving key to execute the challenge at each session.
 
-- <https://github.com/scipr-lab/libfqfft>
+It is not why this project aim for, it add a requirement that a user must know his password and keep a key to execute the challenge at each session.
 
-```bash
-cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B build
-cmake --build build -j
-cmake --install build
-```
-
-### libsnark
-
-- <https://github.com/scipr-lab/libsnark>
-
-```bash
-cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B build
-cmake --build build -j
-cmake --install build
-```
-
-```bash
-g++ snark.cpp -o snark_app -std=c++23 -L /usr/local/lib -lsnark -lff -lgmp -lgmpxx
-```
+The server can not keep a proving key for each user due the leak of the secret that can be used to execute the challenge at each session.
 
 ----
 
-## Zero-Knowledge Scalable Transparent Argument of Knowledge (zkSTARK)
-
-### Sources
-
-- <https://aszepieniec.github.io/stark-anatomy/fri.html>
-- <https://github.com/scipr-lab/libfqfft>
-- <https://github.com/scipr-lab/libsnark.git>
 
 ## Lattices zero-knowledge proofs
 
 - <https://www.alonrosen.net/PAPERS/lattices/description.pdf>
 - <https://www.rfc-editor.org/rfc/pdfrfc/rfc8235.txt.pdf>
 
+Use lattices SIS (short integer solutions) ZKP to prove that the password is correct.
+
+Will implement the LWE (Learning with errors) variant.
+
 
 ## Basic zero-knowledge proofs with client side password hash
 
 ## Fido2 no password zero-knowledge proofs with asymetric key
 
+## STARK Proofs
+
+use plonky2 is a library for STARK proofs in rust.
+
+will move to https://github.com/Plonky3/Plonky3 in production.
+
+- <https://eprint.iacr.org/2018/046.pdf>
+- <https://eprint.iacr.org/2019/458.pdf>
+- <https://eprint.iacr.org/2020/1536.pdf>
+
+## GPU
+
+```bash
+apt update
+apt install mesa-vulkan-drivers \
+    vulkan-tools libvulkan-dev \
+    libvulkan1 vulkan-tools \
+    glslang-tools spirv-cross \
+    glslc
+```
+
+```bash
+wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | tee /etc/apt/trusted.gpg.d/lunarg.asc
+wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list http://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+apt update
+apt install vulkan-sdk
+```
+
+<!-- https://github.com/KhronosGroup/SPIRV-Cross -->
+
+```bash
+vulkaninfo
+```
+
+
+Maybe move all codebase to zig language and use zig-wasm to compile to WASM.
+
+Zig has better support for vectors and SIMD instructions than C/C++ and the std include all function and types used in openssl EC curves operations and big number (multiprecision integers) with constant time operations and better parallelisation support.

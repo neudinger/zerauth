@@ -23,5 +23,16 @@
             "envFile": "",
             "preLaunchTask": "zerauth build",
         },
+        {
+            "name": "Debug lattice",
+            "request": "launch",
+            "type": "cppdbg",
+            "program": "${workspaceFolder}/lattices/a.out",
+            "cwd": "${workspaceFolder}",
+            "args": [],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+        },
     ]
 }

@@ -96,3 +96,6 @@ web/zerauth.js
 web/zerauth.wasm
 src/flatbuffers/*
 cpd_file_list.txt
+*/pkg
+*/target
+*.lock

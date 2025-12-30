@@ -1,0 +1,12 @@
+{
+    "authenticatorAttachment": "cross-platform",
+    "clientExtensionResults": {},
+    "id": "QJncNVNxqteWHTx3mmh_iXHDAv1Sx6tYBOOiGh2pSI0",
+    "rawId": "QJncNVNxqteWHTx3mmh_iXHDAv1Sx6tYBOOiGh2pSI0",
+    "response": {
+        "authenticatorData": "IKGU9QaXoQLmbAlD_lBezoSuZTkFb4Z7JDH4PjyZlRwFAAAAGQ",
+        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQWJjXzEyM19ERUZfNDU2X0dISV83ODlfSktMXzAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL2ZpZG8yLmxvY2FsaG9zdCIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+        "signature": "MEUCIBeT1a_pBUTttB_j_sakPbPNv_Efkj8EKOkGmbyWjXbzAiEA9hpky0Hc3Ey26sfytuodn5qm3Wk0te9zLCuseIFyd7o"
+    },
+    "type": "public-key"
+}
