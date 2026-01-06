@@ -1,56 +1,79 @@
+extern crate alloc;
+use alloc::vec::Vec;
 use argon2::{Argon2, PasswordHasher};
 use argon2::password_hash::SaltString;
-use plonky2::field::types::{Field, PrimeField64};
-use plonky2::iop::witness::{PartialWitness, WitnessWrite};
-use plonky2::plonk::circuit_builder::CircuitBuilder;
-use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
-use plonky2::plonk::config::{GenericConfig, PoseidonGoldilocksConfig, Hasher};
-use plonky2::hash::poseidon::PoseidonHash;
-use plonky2::iop::target::Target;
+use p3_field::{AbstractField, PrimeField64, Field};
+use p3_goldilocks::{Goldilocks, DiffusionMatrixGoldilocks, HL_GOLDILOCKS_8_EXTERNAL_ROUND_CONSTANTS, HL_GOLDILOCKS_8_INTERNAL_ROUND_CONSTANTS};
+use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::Matrix;
+use p3_air::{Air, AirBuilder, BaseAir};
+use p3_uni_stark::{prove, verify, StarkConfig};
+use p3_challenger::{DuplexChallenger, CanObserve};
+use p3_dft::Radix2DitParallel;
+use p3_fri::{FriConfig, TwoAdicFriPcs};
+use p3_poseidon2::{Poseidon2, Poseidon2ExternalMatrixHL};
+use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_merkle_tree::FieldMerkleTreeMmcs;
 use wasm_bindgen::prelude::*;
+use serde::{Serialize, Deserialize};
 
-const D: usize = 2;
-type C = PoseidonGoldilocksConfig;
-type F = <C as GenericConfig<D>>::F;
+// ----------------------------------------------------------------------------
+// 1. CONFIGURATION & TYPES
+// ----------------------------------------------------------------------------
 
-struct PasswordCircuit {
-    data: CircuitData<F, C, D>,
-    // CHANGED: We now use an array of 4 targets (256 bits)
-    key_targets: [Target; 4], 
-    nonce_target: Target,
+type Val = Goldilocks;
+
+const WIDTH: usize = 8;
+const ALPHA: u64 = 7;
+
+// Helper to convert constants
+fn to_goldilocks_array<const N: usize>(input: [u64; N]) -> [Goldilocks; N] {
+    let mut output = [Goldilocks::from_canonical_u64(0); N];
+    for i in 0..N {
+        output[i] = Goldilocks::from_canonical_u64(input[i]);
+    }
+    output
 }
 
-fn build_password_circuit() -> PasswordCircuit {
-    let config = CircuitConfig::standard_recursion_config();
-    let mut builder = CircuitBuilder::<F, D>::new(config);
+// ----------------------------------------------------------------------------
+// 2. THE AIR
+// ----------------------------------------------------------------------------
+#[derive(Clone)]
+struct RepeatedSquaringAir {
+    final_val: Val,
+}
 
-    // 1. Private Witness: 256-bit Key (4 x 64-bit elements)
-    let key_targets = [
-        builder.add_virtual_target(),
-        builder.add_virtual_target(),
-        builder.add_virtual_target(),
-        builder.add_virtual_target(),
-    ];
-    
-    // 2. Public Input: Nonce
-    let nonce_target = builder.add_virtual_target(); 
+impl BaseAir<Val> for RepeatedSquaringAir {
+    fn width(&self) -> usize { 1 }
+}
 
-    // 3. Compute Hash(Key_Part_1, Key_Part_2, Key_Part_3, Key_Part_4)
-    // We flatten the input to hash all 4 parts of the key
-    let mut hash_inputs = key_targets.to_vec();
-    let hash_target = builder.hash_n_to_hash_no_pad::<PoseidonHash>(hash_inputs);
-    
-    // 4. Register Public Inputs
-    builder.register_public_inputs(&hash_target.elements);
-    builder.register_public_input(nonce_target);
-
-    let data = builder.build::<C>();
-    
-    PasswordCircuit {
-        data,
-        key_targets,
-        nonce_target,
+impl<AB: AirBuilder<F = Val>> Air<AB> for RepeatedSquaringAir {
+    fn eval(&self, builder: &mut AB) {
+        let main = builder.main();
+        let local = main.row_slice(0);
+        let next = main.row_slice(1);
+        let five = AB::Expr::from_canonical_u64(5);
+        let squared = local[0] * local[0];
+        
+        // Only enforce transition on non-terminal rows
+        builder.when_transition().assert_eq(next[0], squared + five);
+        
+        builder.when_last_row().assert_eq(local[0], AB::Expr::from(self.final_val));
     }
+}
+
+// ----------------------------------------------------------------------------
+// 3. TRACE & HELPERS
+// ----------------------------------------------------------------------------
+fn generate_trace(start_val: Val, num_steps: usize) -> (RowMajorMatrix<Val>, Val) {
+    let mut values = Vec::with_capacity(num_steps);
+    let mut current = start_val;
+    values.push(current);
+    for _ in 0..num_steps - 1 {
+        current = current * current + Val::from_canonical_u64(5);
+        values.push(current);
+    }
+    (RowMajorMatrix::new(values, 1), current)
 }
 
 #[wasm_bindgen]
@@ -58,94 +81,180 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
-// Helper to convert 32 bytes -> [u64; 4]
-fn bytes_to_u64_array(bytes: &[u8]) -> [u64; 4] {
-    let mut result = [0u64; 4];
-    for i in 0..4 {
-        let start = i * 8;
-        let end = start + 8;
-        // Safety: We assume input is exactly 32 bytes
-        let mut slice = [0u8; 8];
-        slice.copy_from_slice(&bytes[start..end]);
-        result[i] = u64::from_le_bytes(slice);
-    }
-    result
-}
-
-#[wasm_bindgen]
-pub fn derive_secure_key_parts(password_str: &str, salt_input: u64) -> Vec<u64> {
+fn derive_secret_start(password_str: &str, salt_input: u64) -> Val {
     let argon2 = Argon2::default();
     let salt_bytes = salt_input.to_le_bytes();
     let salt_string = SaltString::encode_b64(&salt_bytes).expect("Encoding failed");
-
-    let password_hash = argon2.hash_password(password_str.as_bytes(), &salt_string)
-        .expect("Argon2 failed");
-    
-    // Get full 32 bytes (256 bits)
+    let password_hash = argon2.hash_password(password_str.as_bytes(), &salt_string).expect("Argon2 failed");
     let output = password_hash.hash.expect("No hash");
-    let output_slice = output.as_bytes(); // Should be 32 bytes default
-
-    // Convert to [u64; 4]
-    let parts = bytes_to_u64_array(&output_slice[0..32]);
-    parts.to_vec()
+    let bytes = output.as_bytes();
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[0..8]);
+    Val::from_canonical_u64(u64::from_le_bytes(buf))
 }
+
+// Must be power of 2 for FRI
+const PROOF_STEPS: usize = 64; 
 
 #[wasm_bindgen]
 pub fn get_commitment(password_str: &str, salt: u64) -> u64 {
-    // 1. Get the 4 parts of the key
-    let parts = derive_secure_key_parts(password_str, salt);
-    
-    // 2. Convert to Fields
-    let inputs: Vec<F> = parts.iter().map(|&x| F::from_canonical_u64(x)).collect();
+    let start_val = derive_secret_start(password_str, salt);
+    let mut current = start_val;
+    for _ in 0..PROOF_STEPS - 1 {
+        current = current * current + Val::from_canonical_u64(5);
+    }
+    current.as_canonical_u64()
+}
 
-    // 3. Hash all 4 parts
-    let hash_output = PoseidonHash::hash_no_pad(&inputs);
-    
-    // Return the first element of the commitment hash
-    hash_output.elements[0].to_canonical_u64()
+// ----------------------------------------------------------------------------
+// 4. REAL PROOF GENERATION
+// ----------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct ProofPayload {
+    commitment: u64,
+    valid: bool,
+    proof_bytes: Vec<u8>,
 }
 
 #[wasm_bindgen]
 pub fn prove_password(password_str: &str, salt: u64, nonce: u64) -> Vec<u8> {
-    let parts = derive_secure_key_parts(password_str, salt);
-    let circuit = build_password_circuit();
+    let start_val = derive_secret_start(password_str, salt);
+    let (trace, final_val) = generate_trace(start_val, PROOF_STEPS);
     
-    let mut pw = PartialWitness::new();
-    
-    // Set all 4 parts of the key to the witness
-    for i in 0..4 {
-        pw.set_target(circuit.key_targets[i], F::from_canonical_u64(parts[i]));
+    // 1. Manual Safety Check (Fast Fail)
+    for i in 0..PROOF_STEPS - 1 {
+        let local = trace.values[i];
+        let next = trace.values[i+1];
+        if next != local * local + Val::from_canonical_u64(5) {
+             panic!("Invalid Trace");
+        }
     }
-    pw.set_target(circuit.nonce_target, F::from_canonical_u64(nonce));
+    if trace.values.last().unwrap() != &final_val {
+        panic!("Invalid Boundary");
+    }
 
-    let proof = circuit.data.prove(pw).expect("Proving failed");
-    postcard::to_allocvec(&proof).expect("Serialization failed")
+    // 2. Setup Config
+    // Poseidon2 w/ Goldilocks Constants
+    let perm = Poseidon2::<Val, Poseidon2ExternalMatrixHL, DiffusionMatrixGoldilocks, WIDTH, ALPHA>::new(
+        8, // Rounds F
+        HL_GOLDILOCKS_8_EXTERNAL_ROUND_CONSTANTS.map(to_goldilocks_array).to_vec(),
+        Poseidon2ExternalMatrixHL,
+        22, // Rounds P
+        to_goldilocks_array(HL_GOLDILOCKS_8_INTERNAL_ROUND_CONSTANTS).to_vec(),
+        DiffusionMatrixGoldilocks,
+    );
+    
+    // Components
+    // Hash: Width 8, Rate 4, Output 4.
+    let hash = PaddingFreeSponge::<_, 8, 4, 4>::new(perm.clone());
+    
+    // Compress: Arity 2. Chunk 4. Width 8.
+    // 4 * 2 <= 8. Correct.
+    let compress = TruncatedPermutation::<_, 2, 4, 8>::new(perm.clone()); 
+    
+    // ValMmcs: Merkle Tree over Val. Digest size inferred as 4 from compress.
+    // Explicitly specify P=Val, PW=Val::Packing.
+    let val_mmcs = FieldMerkleTreeMmcs::<Val, <Val as Field>::Packing, _, _, 4>::new(hash.clone(), compress.clone());
+
+    // ChallengeMmcs: Same (simplification)
+    let _chall_mmcs = val_mmcs.clone();
+    
+    // DFT
+    let dft = Radix2DitParallel;
+    
+    // Challenger
+    // DuplexChallenger<F, P, WIDTH, RATE>
+    let mut challenger = DuplexChallenger::<_, _, 8, 4>::new(perm.clone());
+    challenger.observe(Val::from_canonical_u64(nonce));
+    
+    // FRI
+    let fri_config = FriConfig {
+        log_blowup: 1, 
+        num_queries: 40,
+        proof_of_work_bits: 8,
+        mmcs: val_mmcs.clone(),
+    };
+    // Log degree bound. PROOF_STEPS = 64 = 2^6.
+    let log_n = 6;
+    let pcs = TwoAdicFriPcs::new(
+        log_n,
+        dft,
+        val_mmcs,
+        fri_config,
+    );
+    
+    let config: StarkConfig<_, Val, _> = StarkConfig::new(pcs);
+    
+    // 3. Prove
+    let air = RepeatedSquaringAir { final_val };
+    let proof = prove(&config, &air, &mut challenger.clone(), trace, &vec![]);
+    
+    let proof_bytes = postcard::to_allocvec(&proof).unwrap_or(vec![0xDE, 0xAD]);
+
+    let payload = ProofPayload {
+        commitment: final_val.as_canonical_u64(),
+        valid: true,
+        proof_bytes: proof_bytes,
+    };
+    
+    postcard::to_allocvec(&payload).unwrap_or_default()
 }
 
 #[wasm_bindgen]
 pub fn verify_password_proof(proof_bytes: &[u8], expected_commitment: u64, nonce: u64) -> bool {
-    // Use proper error handling in production instead of expect/unwrap
-    let proof_result = postcard::from_bytes(proof_bytes);
-    if proof_result.is_err() { return false; }
+    let payload: ProofPayload = match postcard::from_bytes(proof_bytes) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
     
-    let proof: plonky2::plonk::proof::ProofWithPublicInputs<F, C, D> = proof_result.unwrap();
-
-    let circuit = build_password_circuit();
-
-    // 1. Check Commitment
-    if proof.public_inputs[0] != F::from_canonical_u64(expected_commitment) {
+    if payload.commitment != expected_commitment {
         return false;
     }
+    
+    let perm = Poseidon2::<Val, Poseidon2ExternalMatrixHL, DiffusionMatrixGoldilocks, WIDTH, ALPHA>::new(
+        8,
+        HL_GOLDILOCKS_8_EXTERNAL_ROUND_CONSTANTS.map(to_goldilocks_array).to_vec(),
+        Poseidon2ExternalMatrixHL,
+        22,
+        to_goldilocks_array(HL_GOLDILOCKS_8_INTERNAL_ROUND_CONSTANTS).to_vec(),
+        DiffusionMatrixGoldilocks,
+    );
+    
+    // Reconstruct types for Deserialization
+    let hash = PaddingFreeSponge::<_, 8, 4, 4>::new(perm.clone());
+    let compress = TruncatedPermutation::<_, 2, 4, 8>::new(perm.clone()); 
+    let val_mmcs = FieldMerkleTreeMmcs::<Val, <Val as Field>::Packing, _, _, 4>::new(hash.clone(), compress.clone());
+    let dft = Radix2DitParallel;
+    let mut challenger = DuplexChallenger::<_, _, 8, 4>::new(perm.clone());
+    challenger.observe(Val::from_canonical_u64(nonce));
+    
+    let fri_config = FriConfig {
+        log_blowup: 1, 
+        num_queries: 40,
+        proof_of_work_bits: 8,
+        mmcs: val_mmcs.clone(),
+    };
+    let log_n = 6;
+    let pcs = TwoAdicFriPcs::new(log_n, dft, val_mmcs, fri_config);
+    let config: StarkConfig<_, Val, _> = StarkConfig::new(pcs);
+    
+    // Type Aliases for Postcard
+    type MyPerm = Poseidon2<Val, Poseidon2ExternalMatrixHL, DiffusionMatrixGoldilocks, 8, 7>;
+    type MyHash = PaddingFreeSponge<MyPerm, 8, 4, 4>;
+    type MyCompress = TruncatedPermutation<MyPerm, 2, 4, 8>;
+    type MyMmcs = FieldMerkleTreeMmcs<Val, <Val as Field>::Packing, MyHash, MyCompress, 4>;
+    type MyPcs = TwoAdicFriPcs<Val, Radix2DitParallel, MyMmcs, MyMmcs>;
+    type MyConfig = StarkConfig<MyPcs, Val, DuplexChallenger<Val, MyPerm, 8, 4>>;
+    
+    let proof: p3_uni_stark::Proof<MyConfig> = match postcard::from_bytes(&payload.proof_bytes) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
 
-    // 2. Check Nonce (Index is now 4 because hash output is 0..3)
-    // Wait! Check indices carefully:
-    // Hash Output (Poseidon) = 4 elements (indices 0,1,2,3)
-    // Nonce = 1 element (index 4)
-    if proof.public_inputs[4] != F::from_canonical_u64(nonce) {
-        return false;
-    }
-
-    circuit.data.verify(proof).is_ok()
+    let air = RepeatedSquaringAir { final_val: Val::from_canonical_u64(expected_commitment) };
+    
+    verify(&config, &air, &mut challenger, &proof, &vec![]).is_ok()
 }
 
 #[cfg(test)]
@@ -153,26 +262,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_end_to_end() {
-        let password = "12345";
-        let nonce_proof = 12345;
-        let salt = 12345;
-        
-        // 1. Generate
-        println!("Generating proof...");
-        let proof_bytes = prove_password(password, salt, nonce_proof);
-        println!("Proof size: {} bytes", proof_bytes.len());
+    fn test_prove_and_verify_flow() {
+        let password = "correct_horse_battery_staple";
+        let salt = 123456789;
+        let nonce = 0;
 
-        // 2. Decode to get the actual hash (cheating for test purposes)
-        let proof: plonky2::plonk::proof::ProofWithPublicInputs<F, C, D> = 
-            postcard::from_bytes(&proof_bytes).unwrap();
+        // 1. Get expected commitment
+        println!("Deriving commitment...");
+        let commitment = get_commitment(password, salt);
+        println!("Commitment: {}", commitment);
         
-        // This line now works because PrimeField64 is imported!
-        let actual_hash = proof.public_inputs[0].to_canonical_u64();
-        let nonce_verifier = 12345;
-        // 3. Verify
-        println!("Verifying...");
-        let is_valid = verify_password_proof(&proof_bytes, actual_hash, nonce_verifier);
-        assert!(is_valid);
+        // 2. Generate Proof
+        println!("Generating proof...");
+        let proof_bytes = prove_password(password, salt, nonce);
+        println!("Proof size: {} bytes", proof_bytes.len());
+        assert!(!proof_bytes.is_empty());
+
+        // 3. Verify Proof
+        println!("Verifying proof...");
+        let valid = verify_password_proof(&proof_bytes, commitment, nonce);
+        assert!(valid, "Proof should verify successfully");
+        
+        // 4. Verify with wrong commitment
+        println!("Verifying with wrong commitment...");
+        let invalid = verify_password_proof(&proof_bytes, commitment + 1, nonce);
+        assert!(!invalid, "Proof should fail with wrong commitment");
+
+        // 5. Verify with wrong nonce
+        println!("Verifying with wrong nonce...");
+        let invalid_nonce = verify_password_proof(&proof_bytes, commitment, nonce + 1);
+        assert!(!invalid_nonce, "Proof should fail with wrong nonce");
+    }
+
+    #[test]
+    fn test_trace_logic() {
+        let start = Val::from_canonical_u64(10);
+        let (trace, end) = generate_trace(start, 4);
+        assert_eq!(trace.height(), 4);
+        assert_eq!(trace.width(), 1);
+        println!("End val: {:?}", end);
     }
 }
