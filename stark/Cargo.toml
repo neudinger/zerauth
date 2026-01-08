@@ -5,7 +5,7 @@ edition = "2021"
 
 # "cdylib" is required for WASM
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 anyhow = "1.0"
@@ -34,6 +34,8 @@ p3-keccak = "0.1.0"
 p3-poseidon2 = "0.1.0"
 p3-dft = "0.1.0"
 p3-fri = "0.1.0"
+
+libc = "0.2"
 
 [profile.release]
 lto = true

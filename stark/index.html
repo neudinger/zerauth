@@ -1,183 +1,505 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ZK Auth + Salt + Replay Protection</title>
+    <title>Interactive ZK Flow</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg: #0f172a;
+            --card: #1e293b;
+            --border: #334155;
+            --primary: #3b82f6;
+            --accent: #8b5cf6;
+            --text: #f1f5f9;
+            --text-dim: #94a3b8;
+            --success: #10b981;
+            --mono: 'Fira Code', monospace;
+        }
+
         body {
-            font-family: -apple-system, sans-serif;
-            max-width: 700px;
-            margin: 2rem auto;
-            padding: 0 1rem;
-            color: #333;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
         }
 
-        .box {
-            border: 1px solid #ddd;
-            padding: 1.5rem;
-            border-radius: 8px;
-            margin-bottom: 1.5rem;
-            background-color: #f9f9f9;
-        }
-
-        .row {
-            margin-bottom: 1rem;
-        }
-
-        label {
-            display: block;
-            font-weight: bold;
-            margin-bottom: 0.3rem;
-            font-size: 0.9rem;
-        }
-
-        input {
-            padding: 8px;
+        .container {
+            max-width: 900px;
             width: 100%;
-            max-width: 300px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            font-family: monospace;
-            font-size: 1.1rem;
         }
 
+        h1 { margin-bottom: 0.5rem; }
+        .subtitle { color: var(--text-dim); margin-bottom: 3rem; }
+
+        /* --- THE STAGE CARD --- */
+        .stage {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            opacity: 0.4;
+            transition: opacity 0.5s, transform 0.3s;
+            filter: grayscale(0.8);
+            pointer-events: none;
+        }
+
+        .stage.active {
+            opacity: 1;
+            filter: grayscale(0);
+            pointer-events: all;
+            box-shadow: 0 0 40px rgba(59, 130, 246, 0.1);
+            transform: scale(1.01);
+        }
+
+        .stage-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1rem;
+        }
+
+        .stage-title { font-size: 1.25rem; font-weight: 700; color: var(--primary); }
+        .stage-desc { font-size: 0.9rem; color: var(--text-dim); max-width: 600px; margin-top: 0.5rem;}
+
+        /* --- THE PIPELINE VISUALIZATION --- */
+        .pipeline {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .pipeline-row {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        /* NODES in the pipeline */
+        .node {
+            background: #000;
+            border: 1px solid var(--border);
+            padding: 0.8rem 1.2rem;
+            border-radius: 8px;
+            font-family: var(--mono);
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            position: relative;
+            min-width: 120px;
+            text-align: center;
+            transition: all 0.5s ease;
+        }
+
+        .node-label {
+            position: absolute;
+            top: -20px;
+            left: 0;
+            font-size: 0.7rem;
+            font-family: 'Inter', sans-serif;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        /* Different Types of Nodes */
+        .node.input { border-color: var(--primary); color: #fff; }
+        .node.func { 
+            background: var(--border); 
+            border-color: var(--text-dim); 
+            border-radius: 20px; /* Rounded for functions */
+            font-weight: bold;
+        }
+        .node.output { border-color: var(--success); color: var(--success); }
+        
+        /* Active State for Animation */
+        .node.processing {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 0 15px var(--primary);
+            border-color: var(--primary);
+            transform: scale(1.05);
+        }
+
+        /* Arrows */
+        .arrow {
+            color: var(--text-dim);
+            font-size: 1.2rem;
+            transition: color 0.3s;
+        }
+        .arrow.active { color: var(--primary); }
+
+        /* Explainer Box that appears during processing */
+        .explainer {
+            background: rgba(59, 130, 246, 0.1);
+            border-left: 3px solid var(--primary);
+            padding: 1rem;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            color: #dbeafe;
+            display: none; /* Hidden by default */
+            animation: slideIn 0.3s ease-out;
+        }
+
+        /* Inputs */
+        input.user-input {
+            background: transparent;
+            border: none;
+            color: white;
+            font-family: var(--mono);
+            font-size: 0.9rem;
+            width: 100%;
+            outline: none;
+            text-align: center;
+        }
+
+        /* Buttons */
         button {
-            padding: 10px 20px;
-            cursor: pointer;
-            background: #007bff;
+            background: var(--primary);
             color: white;
             border: none;
-            border-radius: 4px;
-            font-size: 1rem;
-        }
-
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-
-        .status {
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
             margin-top: 1rem;
-            font-weight: 500;
+            transition: 0.2s;
         }
+        button:hover { filter: brightness(1.1); }
+        button:disabled { background: var(--border); cursor: not-allowed; }
 
-        .success {
-            color: green;
-        }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
 
-        .error {
-            color: red;
-        }
-
-        input[readonly] {
-            background-color: #e9ecef;
-            color: #495057;
-        }
     </style>
 </head>
-
 <body>
-    <h1>ZK Auth (Argon2 Hardened)</h1>
-    <p>Using <b>Argon2</b> (CPU intensive) for hardening and <b>STARK</b> (Fast) for proof.</p>
 
-    <div class="box">
-        <h3>📝 1. Registration</h3>
-        <p>We calculate <code>Commitment = Poseidon(Argon2(Password, Salt))</code>.</p>
+<div class="container">
+    <header>
+        <h1>ZK Identity Flow</h1>
+        <p class="subtitle">Interactive Step-by-Step Visualization</p>
+    </header>
 
-        <label>Password:</label>
-        <input type="text" id="password" value="mySuperSecretPassword" />
+    <div class="stage active" id="stage-1">
+        <div class="stage-header">
+            <div>
+                <div class="stage-title">1. Registration (Client Side)</div>
+                <div class="stage-desc">
+                    We need to create a public "anchor" (Commitment) for the database.
+                    Crucially, we must <b>harden</b> the password first to prevent brute-force attacks.
+                </div>
+            </div>
+        </div>
 
-        <br><br>
-        <button onclick="doRegistration()">Register (Generate Salt & Hash)</button>
+        <div class="pipeline">
+            <div class="pipeline-row">
+                <div class="node input">
+                    <span class="node-label">Input: Password</span>
+                    <input type="text" class="user-input" id="inp-password" value="mySecret123">
+                </div>
+                <div class="arrow" id="arr-1">+</div>
+                <div class="node input">
+                    <span class="node-label">Input: Salt (Random)</span>
+                    <span id="val-salt">?</span>
+                </div>
+            </div>
 
-        <p><b>Salt (Public):</b> <span id="saltDisplay">-</span></p>
-        <p><b>Commitment (Stored in DB):</b> <span id="dbHashDisplay">-</span></p>
+            <div class="arrow vertical" id="arr-2">↓</div>
+            <div class="pipeline-row">
+                <div class="node func" id="node-argon">
+                    Argon2(Pass, Salt)
+                </div>
+                <div class="arrow" id="arr-3">➜</div>
+                <div class="node" id="node-secret">
+                    <span class="node-label">Intermediate: Hardened Secret</span>
+                    <span id="val-secret">HIDDEN</span>
+                </div>
+            </div>
+
+            <div class="arrow vertical" id="arr-4">↓</div>
+            <div class="pipeline-row">
+                <div class="node func" id="node-poseidon">
+                    Poseidon(Secret)
+                </div>
+                <div class="arrow" id="arr-5">➜</div>
+                <div class="node output" id="node-commitment">
+                    <span class="node-label">Output: Public Commitment</span>
+                    <span id="val-commitment">WAITING</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="explainer" id="explainer-1"></div>
+
+        <button onclick="runRegistration()" id="btn-reg">Run Registration Pipeline</button>
     </div>
 
-    <div class="box">
-        <h3>🔐 2. Login</h3>
-        <button id="proveBtn" onclick="generateProof()" disabled>Generate Proof</button>
-        <div id="proveStatus">Waiting for registration...</div>
+
+    <div class="stage" id="stage-2">
+        <div class="stage-header">
+            <div>
+                <div class="stage-title">2. Login Proof (Zero Knowledge)</div>
+                <div class="stage-desc">
+                    The user wants to login. The server sends a random <b>Nonce</b>. 
+                    We must prove we know the <i>Hardened Secret</i> that leads to the <i>Commitment</i>, without sending the secret itself.
+                </div>
+            </div>
+        </div>
+
+        <div class="pipeline">
+            <div class="pipeline-row">
+                <div class="node input">
+                    <span class="node-label">Private Input</span>
+                    Hardened Secret
+                </div>
+                <div class="node input">
+                    <span class="node-label">Public Input</span>
+                    Nonce: <span id="val-nonce">555</span>
+                </div>
+            </div>
+
+            <div class="arrow" style="text-align:center">↓</div>
+
+            <div class="pipeline-row">
+                <div class="node func" id="node-trace" style="width: 100%">
+                    Generate Execution Trace (Repeated Squaring)
+                    <br>
+                    <span style="font-size:0.7em; color:#fff; display:block; margin-top:5px;" id="trace-anim">
+                        x₀ -> x₁ -> ... -> x₆₄
+                    </span>
+                </div>
+            </div>
+
+            <div class="arrow" style="text-align:center" id="arr-trace">↓</div>
+
+            <div class="pipeline-row">
+                <div class="node func" id="node-stark">
+                    STARK Prover
+                </div>
+                <div class="arrow" id="arr-proof">➜</div>
+                <div class="node output" id="node-proof">
+                    <span class="node-label">Output: The Proof</span>
+                    <span id="val-proof">WAITING</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="explainer" id="explainer-2"></div>
+        <button onclick="runProving()" id="btn-prove">Generate ZK Proof</button>
     </div>
 
-    <div class="box">
-        <h3>🛡️ 3. Verification</h3>
-        <button id="verifyBtn" onclick="verifyProof()" disabled>Verify Proof</button>
-        <div id="verifyStatus">Waiting...</div>
+    <div class="stage" id="stage-3">
+        <div class="stage-header">
+            <div>
+                <div class="stage-title">3. Server Verification</div>
+                <div class="stage-desc">
+                    The server receives the Proof. It checks it against the Commitment stored in the DB.
+                    <b>It never sees the password.</b>
+                </div>
+            </div>
+        </div>
+
+        <div class="pipeline">
+            <div class="pipeline-row">
+                <div class="node input">Proof</div>
+                <div class="node input">Public Commitment</div>
+                <div class="node input">Nonce</div>
+            </div>
+            
+            <div class="arrow">↓</div>
+
+            <div class="pipeline-row">
+                <div class="node func" id="node-verify">STARK Verifier</div>
+                <div class="arrow">➜</div>
+                <div class="node output" id="node-result">
+                    <span class="node-label">Result</span>
+                    <span id="val-result">?</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="explainer" id="explainer-3"></div>
+        <button onclick="runVerification()" id="btn-verify">Verify Access</button>
     </div>
 
-    <script type="module">
-        import init, { prove_password, verify_password_proof, init_panic_hook, get_commitment } from './pkg/stark_password_proof.js';
+</div>
 
-        let generatedProof = null;
-        let activeNonce = 555n; // Fixed nonce for demo simplicity
-        let activeSalt = null;
-        let storedCommitment = null;
+<script type="module">
+    // Mock Mode Configuration
+    const MOCK = false; 
 
-        function getSecureRandomBigInt() {
-            const array = new BigUint64Array(1);
-            window.crypto.getRandomValues(array);
-            // Ensure it fits in a positive signed 64-bit integer for safety, 
-            // though BigUint64 is fine for u64 in Rust.
-            return array[0];
+    // Imports (assuming standard wasm-pack structure)
+    let wasm;
+    try {
+        if(!MOCK) {
+            wasm = await import('./pkg/stark_password_proof.js');
+            await wasm.default();
+            wasm.init_panic_hook();
+        }
+    } catch(e) {
+        console.warn("WASM not found, defaulting to visual mock mode.");
+    }
+
+    // State
+    const state = {
+        password: "",
+        salt: null,
+        commitment: null,
+        proof: null,
+        nonce: BigInt(555)
+    };
+
+    // Helper: Delay function for animation timing
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+    const getEl = id => document.getElementById(id);
+
+    // --- ANIMATION CONTROLLERS ---
+
+    window.runRegistration = async () => {
+        const btn = getEl('btn-reg');
+        const passInput = getEl('inp-password');
+        const explainer = getEl('explainer-1');
+
+        btn.disabled = true;
+        state.password = passInput.value;
+        
+        // 1. Generate Salt
+        state.salt = BigInt(Math.floor(Math.random() * 10000000));
+        getEl('val-salt').innerText = state.salt;
+        getEl('val-salt').style.color = "#fff";
+        await delay(500);
+
+        // 2. Highlight Argon2
+        explainer.style.display = 'block';
+        explainer.innerHTML = "<b>Argon2 Step:</b> We are mixing the Password and Salt. Argon2 is 'Memory Hard', meaning it takes significant RAM and CPU to compute. This makes it impossible for hackers to brute-force millions of passwords per second.";
+        
+        const argonNode = getEl('node-argon');
+        argonNode.classList.add('processing');
+        await delay(1500); // Simulate "Slowness" of Argon2
+        argonNode.classList.remove('processing');
+
+        // 3. Reveal Secret (Intermediate)
+        getEl('arr-3').classList.add('active');
+        // Mock a derived secret visual
+        const secretVisual = "0x" + Math.random().toString(16).substr(2, 8) + "..."; 
+        getEl('val-secret').innerText = secretVisual;
+        getEl('val-secret').style.color = "#fff";
+        await delay(800);
+
+        // 4. Highlight Poseidon
+        explainer.innerHTML = "<b>Poseidon Step:</b> Now we take that hardened secret and hash it using Poseidon. Poseidon is a 'ZK-Friendly' hash function, optimized for the math we will use in the next step.";
+        const posNode = getEl('node-poseidon');
+        posNode.classList.add('processing');
+        await delay(800);
+        posNode.classList.remove('processing');
+
+        // 5. Output Commitment
+        getEl('arr-5').classList.add('active');
+        
+        // --- REAL LOGIC ---
+        if(wasm) {
+            state.commitment = wasm.get_commitment(state.password, state.salt);
+        } else {
+            state.commitment = 987654321n;
         }
 
-        async function main() {
-            await init();
-            init_panic_hook();
+        getEl('val-commitment').innerText = state.commitment.toString();
+        
+        explainer.innerHTML = "<b>Done!</b> The 'Commitment' is safe to store in the database. Even if the database is leaked, the attacker cannot reverse the Poseidon hash nor the Argon2 hash.";
+        
+        await delay(1000);
+        activateStage('stage-2');
+    };
+
+    window.runProving = async () => {
+        const btn = getEl('btn-prove');
+        const explainer = getEl('explainer-2');
+        btn.disabled = true;
+
+        explainer.style.display = 'block';
+        explainer.innerHTML = "<b>Trace Generation:</b> We are now running the computation `x -> x² + 5` locally. We document every single step of this math into a 'Trace Table'.";
+
+        // Animate Trace
+        const traceNode = getEl('node-trace');
+        traceNode.classList.add('processing');
+        
+        const traceText = getEl('trace-anim');
+        for(let i=0; i<10; i++) {
+            traceText.innerText = `Step ${i*6}: Val = ${Math.random()*10000}`;
+            await delay(100);
+        }
+        traceNode.classList.remove('processing');
+
+        // Highlight STARK
+        explainer.innerHTML = "<b>STARK Prover:</b> We compress that huge trace table into a small cryptographic proof. We also mix in the 'Nonce' to ensure this proof can't be replayed later.";
+        const starkNode = getEl('node-stark');
+        starkNode.classList.add('processing');
+        
+        // --- REAL LOGIC ---
+        await delay(100); // Give UI time to update before freeze
+        if(wasm) {
+            state.proof = wasm.prove_password(state.password, state.salt, state.nonce);
+        } else {
+            state.proof = new Uint8Array([1,2,3,4]); // Mock
+            await delay(1000);
         }
 
-        window.doRegistration = () => {
-            const password = document.getElementById('password').value;
+        starkNode.classList.remove('processing');
+        getEl('arr-proof').classList.add('active');
+        getEl('val-proof').innerText = `${state.proof.length} bytes`;
 
-            // 1. Generate Salt
-            activeSalt = getSecureRandomBigInt();
-            document.getElementById('saltDisplay').innerText = activeSalt;
+        await delay(1000);
+        activateStage('stage-3');
+    };
 
-            // 2. Calculate Commitment (Argon2 -> Poseidon)
-            console.time("Argon2 Calculation");
-            // Note: We pass the STRING password now
-            storedCommitment = get_commitment(password, activeSalt);
-            console.timeEnd("Argon2 Calculation");
+    window.runVerification = async () => {
+        const btn = getEl('btn-verify');
+        const explainer = getEl('explainer-3');
+        btn.disabled = true;
 
-            document.getElementById('dbHashDisplay').innerText = storedCommitment;
-            document.getElementById('proveBtn').disabled = false;
-            document.getElementById('proveStatus').innerText = "Ready.";
-        };
+        explainer.style.display = 'block';
+        explainer.innerHTML = "<b>Verification:</b> The server opens the proof. It checks the math constraints. It ensures the proof matches the stored Commitment and the active Nonce.";
 
-        window.generateProof = async () => {
-            const password = document.getElementById('password').value;
-            const status = document.getElementById('proveStatus');
-            status.innerText = "Computing Argon2 & Generating Proof...";
+        const verifyNode = getEl('node-verify');
+        verifyNode.classList.add('processing');
+        await delay(1000);
+        verifyNode.classList.remove('processing');
 
-            setTimeout(() => {
-                // Pass Password STRING, Salt, and Nonce
-                generatedProof = prove_password(password, activeSalt, activeNonce);
+        // --- REAL LOGIC ---
+        let isValid = false;
+        if(wasm) {
+            isValid = wasm.verify_password_proof(state.proof, state.commitment, state.nonce);
+        } else {
+            isValid = true;
+        }
 
-                status.innerText = `Proof Generated! (${generatedProof.length} bytes)`;
-                document.getElementById('verifyBtn').disabled = false;
-            }, 100);
-        };
+        const resNode = getEl('val-result');
+        if(isValid) {
+            resNode.innerText = "VALID";
+            resNode.style.color = "var(--success)";
+            explainer.innerHTML = "<b style='color:var(--success)'>SUCCESS:</b> The user proved they know the password without ever sending it!";
+        } else {
+            resNode.innerText = "INVALID";
+            resNode.style.color = "red";
+        }
+    };
 
-        window.verifyProof = () => {
-            const status = document.getElementById('verifyStatus');
+    function activateStage(id) {
+        const el = document.getElementById(id);
+        el.classList.add('active');
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
 
-            // Verify using only Public Data (Commitment + Nonce)
-            const isValid = verify_password_proof(generatedProof, storedCommitment, activeNonce);
+</script>
 
-            if (isValid) {
-                status.innerText = "✅ Login Successful!";
-                status.style.color = "green";
-            } else {
-                status.innerText = "❌ Invalid Proof";
-                status.style.color = "red";
-            }
-        };
-
-        main();
-    </script>
 </body>
-
 </html>

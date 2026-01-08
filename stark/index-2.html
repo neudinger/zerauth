@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZK Auth + Salt + Replay Protection</title>
+    <style>
+        body {
+            font-family: -apple-system, sans-serif;
+            max-width: 700px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            color: #333;
+        }
+
+        .box {
+            border: 1px solid #ddd;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            background-color: #f9f9f9;
+        }
+
+        .row {
+            margin-bottom: 1rem;
+        }
+
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 0.3rem;
+            font-size: 0.9rem;
+        }
+
+        input {
+            padding: 8px;
+            width: 100%;
+            max-width: 300px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 1.1rem;
+        }
+
+        button {
+            padding: 10px 20px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 1rem;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .status {
+            margin-top: 1rem;
+            font-weight: 500;
+        }
+
+        .success {
+            color: green;
+        }
+
+        .error {
+            color: red;
+        }
+
+        input[readonly] {
+            background-color: #e9ecef;
+            color: #495057;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>ZK Auth (Argon2 Hardened)</h1>
+    <p>Using <b>Argon2</b> (CPU intensive) for hardening and <b>STARK</b> (Fast) for proof.</p>
+
+    <div class="box">
+        <h3>📝 1. Registration</h3>
+        <p>We calculate <code>Commitment = Poseidon(Argon2(Password, Salt))</code>.</p>
+
+        <label>Password:</label>
+        <input type="text" id="password" value="mySuperSecretPassword" />
+
+        <br><br>
+        <button onclick="doRegistration()">Register (Generate Salt & Hash)</button>
+
+        <p><b>Salt (Public):</b> <span id="saltDisplay">-</span></p>
+        <p><b>Commitment (Stored in DB):</b> <span id="dbHashDisplay">-</span></p>
+    </div>
+
+    <div class="box">
+        <h3>🔐 2. Login</h3>
+        <button id="proveBtn" onclick="generateProof()" disabled>Generate Proof</button>
+        <div id="proveStatus">Waiting for registration...</div>
+    </div>
+
+    <div class="box">
+        <h3>🛡️ 3. Verification</h3>
+        <button id="verifyBtn" onclick="verifyProof()" disabled>Verify Proof</button>
+        <div id="verifyStatus">Waiting...</div>
+    </div>
+
+    <script type="module">
+        import init, { prove_password, verify_password_proof, init_panic_hook, get_commitment } from './pkg/stark_password_proof.js';
+
+        let generatedProof = null;
+        let activeNonce = 555n; // Fixed nonce for demo simplicity
+        let activeSalt = null;
+        let storedCommitment = null;
+
+        function getSecureRandomBigInt() {
+            const array = new BigUint64Array(1);
+            window.crypto.getRandomValues(array);
+            // Ensure it fits in a positive signed 64-bit integer for safety, 
+            // though BigUint64 is fine for u64 in Rust.
+            return array[0];
+        }
+
+        async function main() {
+            await init();
+            init_panic_hook();
+        }
+
+        window.doRegistration = () => {
+            const password = document.getElementById('password').value;
+
+            // 1. Generate Salt
+            activeSalt = getSecureRandomBigInt();
+            document.getElementById('saltDisplay').innerText = activeSalt;
+
+            // 2. Calculate Commitment (Argon2 -> Poseidon)
+            console.time("Argon2 Calculation");
+            // Note: We pass the STRING password now
+            storedCommitment = get_commitment(password, activeSalt);
+            console.timeEnd("Argon2 Calculation");
+
+            document.getElementById('dbHashDisplay').innerText = storedCommitment;
+            document.getElementById('proveBtn').disabled = false;
+            document.getElementById('proveStatus').innerText = "Ready.";
+        };
+
+        window.generateProof = async () => {
+            const password = document.getElementById('password').value;
+            const status = document.getElementById('proveStatus');
+            status.innerText = "Computing Argon2 & Generating Proof...";
+
+            setTimeout(() => {
+                // Pass Password STRING, Salt, and Nonce
+                generatedProof = prove_password(password, activeSalt, activeNonce);
+
+                status.innerText = `Proof Generated! (${generatedProof.length} bytes)`;
+                document.getElementById('verifyBtn').disabled = false;
+            }, 100);
+        };
+
+        window.verifyProof = () => {
+            const status = document.getElementById('verifyStatus');
+
+            // Verify using only Public Data (Commitment + Nonce)
+            const isValid = verify_password_proof(generatedProof, storedCommitment, activeNonce);
+
+            if (isValid) {
+                status.innerText = "✅ Login Successful!";
+                status.style.color = "green";
+            } else {
+                status.innerText = "❌ Invalid Proof";
+                status.style.color = "red";
+            }
+        };
+
+        main();
+    </script>
+</body>
+
+</html>
