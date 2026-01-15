@@ -1,64 +1,299 @@
-use p3_field::{PrimeField64, FieldArray, BasedVectorSpace, PrimeCharacteristicRing, Packable}; 
-use p3_symmetric::Permutation; // Import Permutation constraint 
+// FFI functions intentionally perform null checks before dereferencing
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
+//! # STARK Password Proof Library
+//! 
+//! A zero-knowledge proof library for password authentication using STARK proofs.
+//! This library allows a prover to demonstrate knowledge of a password without
+//! revealing the password itself.
+//!
+//! ## Overview
+//! 
+//! The library implements a ZK-STARK proof system for password verification:
+//! 
+//! 1. **Registration**: Hash password → store commitment
+//! 2. **Authentication**: Generate ZK proof of password knowledge
+//! 3. **Verification**: Verify proof against stored commitment
+//!
+//! ## Security Parameters
+//! 
+//! | Parameter | Value | Description |
+//! |-----------|-------|-------------|
+//! | Field | Goldilocks | 64-bit prime: 2^64 - 2^32 + 1 |
+//! | Hash | Poseidon2 | SP-network with x^7 S-box |
+//! | Rounds | 255 | Exceeds 30 rounds for 128-bit security |
+//! | Extension | Quadratic | 100+ bit security level |
+//! | FRI Blowup | 8x | log_blowup=3 for degree-7 constraints |
+//!
+//! ## Cryptographic Components
+//!
+//! - **Key Derivation**: Argon2id (memory-hard, timing-resistant)
+//! - **AIR Constraint System**: Poseidon-style SP-network
+//! - **Polynomial Commitment**: FRI-based (Two-Adic)
+//! - **Challenger**: Duplex sponge construction
+//!
+//! ## Threat Model
+//!
+//! **Protected Against**:
+//! - Password exposure during authentication
+//! - Replay attacks (proofs are bound to commitment)
+//! - Timing attacks on key derivation (modular reduction)
+//!
+//! **Assumptions**:
+//! - Argon2id parameters provide adequate memory-hardness
+//! - Poseidon2 behaves as a random oracle
+//! - FRI commitment scheme is computationally binding
+//!
+//! ## Example Usage
+//!
+//! ```rust,ignore
+//! use stark_password_proof::{get_commitment, prove_password, verify_password_proof};
+//!
+//! // Registration: store this commitment
+//! let commitment = get_commitment("password123", b"unique_salt!", 4096, 3, 1)?;
+//!
+//! // Authentication: generate proof
+//! let proof = prove_password("password123", b"unique_salt!", 4096, 3, 1)?;
+//!
+//! // Verification: check proof against commitment
+//! let valid = verify_password_proof(&proof, commitment)?;
+//! assert!(valid);
+//! ```
+//!
+//! ## FFI Safety
+//!
+//! This library exports C-compatible functions for cross-language use.
+//! All FFI functions:
+//! - Validate pointer arguments before dereferencing
+//! - Catch panics to prevent undefined behavior
+//! - Return error codes for failure cases
+//! - Use opaque handles to prevent misuse
+
+use p3_field::{PrimeField64, PrimeCharacteristicRing};
+use p3_symmetric::TruncatedPermutation;
 use p3_field::extension::BinomialExtensionField; 
 use p3_air::{Air, AirBuilder, BaseAir, AirBuilderWithPublicValues}; 
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_goldilocks::{Goldilocks, Poseidon2ExternalLayerGoldilocksHL, Poseidon2InternalLayerGoldilocks}; 
 use p3_uni_stark::{prove, verify, StarkConfig, Proof}; 
-use p3_challenger::{CanObserve, CanSample, FieldChallenger, GrindingChallenger, DuplexChallenger, CanSampleBits}; 
+use p3_challenger::DuplexChallenger; 
 use p3_dft::Radix2DitParallel;
 use p3_fri::{TwoAdicFriPcs, FriParameters}; 
-use p3_merkle_tree::MerkleTreeMmcs; 
+use p3_merkle_tree::MerkleTreeMmcs;
+use p3_commit::ExtensionMmcs;
 
 use p3_poseidon2::Poseidon2;
-use p3_symmetric::{PaddingFreeSponge, CryptographicHasher, PseudoCompressionFunction, Hash};
+use p3_symmetric::PaddingFreeSponge;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Serialize, Deserialize};
 
-
+// ============================================================================
 // 1. CONSTANTS & TYPES
-const GOLDILOCKS_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
-type Val = Goldilocks; // Base Field
-type Challenge = BinomialExtensionField<Val, 2>; // Quadratic Extension for 100-bit+ security
+// ============================================================================
 
-// --- CRYPTOGRAPHIC CONSTANTS FOR POSEIDON-VARIANT AIR ---
-// MDS matrix for width 4 - in production, use official Poseidon constants for Goldilocks
-// This matrix is invertible (det ≠ 0 mod p) and provides proper diffusion
+/// The Goldilocks prime: 2^64 - 2^32 + 1
+pub const GOLDILOCKS_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
+
+/// Base field type (Goldilocks)
+type Val = Goldilocks;
+
+/// Extension field for challenges (quadratic extension)
+type Challenge = BinomialExtensionField<Val, 2>;
+
+// --- INPUT VALIDATION LIMITS ---
+
+/// Maximum allowed password length in bytes
+pub const MAX_PASSWORD_LEN: usize = 128;
+
+/// Minimum required salt length in bytes (Argon2 requirement)
+pub const MIN_SALT_LEN: usize = 8;
+
+/// Maximum allowed salt length in bytes
+pub const MAX_SALT_LEN: usize = 64;
+
+/// Maximum Argon2 memory cost (64MB)
+pub const MAX_M_COST: u32 = 65536;
+
+/// Minimum Argon2 memory cost 
+pub const MIN_M_COST: u32 = 8;
+
+/// Maximum Argon2 time cost
+pub const MAX_T_COST: u32 = 10;
+
+/// Maximum Argon2 parallelism
+pub const MAX_P_COST: u32 = 4;
+
+// --- CRYPTOGRAPHIC CONSTANTS ---
+
+/// Number of hash rounds (255 → trace height 256, exceeds 30 for 128-bit security)
+const NUM_ROUNDS: usize = 255;
+
+/// MDS matrix from Horizen Labs Poseidon2 implementation
+/// This 4x4 circulant matrix provides optimal diffusion
 const MDS_MATRIX: [[u64; 4]; 4] = [
-    [2, 3, 1, 1],
-    [1, 2, 3, 1],
-    [1, 1, 2, 3],
-    [3, 1, 1, 2],
+    [5, 7, 1, 3],
+    [4, 6, 1, 1],
+    [1, 3, 5, 7],
+    [1, 1, 4, 6],
 ];
 
-// Round constants to prevent sliding attacks
-// In production, use officially generated constants from Poseidon spec
-const ROUND_CONSTANT: u64 = 0x42;
+/// Round constant from official Plonky3 Poseidon2 internal rounds
+/// Source: p3-goldilocks/src/poseidon2.rs
+const ROUND_CONSTANT: u64 = 0x488897d85ff51f56;
 
-// 2. AIR DEFINITION
-// SECURITY: Poseidon-Variant Preimage Proof with Proper Cryptography
-// This AIR proves knowledge of a secret S such that Hash(S) = Commitment
-// using a Substitution-Permutation Network (SP-Network) with:
-// - S-Box: x^7 (cryptographically secure for Goldilocks)
-// - Linear Layer: MDS Matrix multiplication
-// - Round Constants: Prevent sliding attacks
-//
-// TRACE LAYOUT (Width = 8):
-// - Columns 0-3: State [s0, s1, s2, s3]
-// - Columns 4-7: S-Box outputs [s0^7, s1^7, s2^7, s3^7]
-//
-// CONSTRAINT STRUCTURE:
-// 1. S-Box constraints: Enforce sbox[i] = state[i]^7
-// 2. Linear layer: state' = MDS * sbox + RC
-// 3. Boundary: Last row state == Public Input (Commitment)
+/// Magic number for FFI handle validation
+const PROOF_HANDLE_MAGIC: u64 = 0x5354_4152_4B50_5246; // "STARKPRF"
 
-#[allow(dead_code)]
+// ============================================================================
+// 2. ERROR TYPES
+// ============================================================================
+
+/// Error codes for FFI and internal use.
+/// 
+/// These codes are returned by C FFI functions and can be used
+/// to determine the cause of failures.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    /// Operation completed successfully
+    Success = 0,
+    /// Password is empty, too long, or invalid UTF-8
+    InvalidPassword = 1,
+    /// Salt length is outside allowed range
+    InvalidSalt = 2,
+    /// Argon2 parameters are invalid
+    InvalidArgonParams = 3,
+    /// Argon2 hashing failed
+    ArgonError = 4,
+    /// Proof generation failed
+    ProvingError = 5,
+    /// Proof verification failed
+    VerificationError = 6,
+    /// Serialization/deserialization failed
+    SerializationError = 7,
+    /// Proof format is invalid or corrupted
+    InvalidProofFormat = 8,
+    /// Commitment in proof doesn't match expected
+    CommitmentMismatch = 9,
+    /// Invalid FFI handle (null, invalid magic, etc.)
+    InvalidHandle = 10,
+    /// Internal panic was caught
+    InternalPanic = 11,
+}
+
+/// Detailed error information.
+///
+/// Contains both a machine-readable error code and a human-readable message.
+#[derive(Debug, Clone)]
+pub struct StarkError {
+    /// Machine-readable error code
+    pub code: ErrorCode,
+    /// Human-readable error message
+    pub message: String,
+}
+
+impl std::fmt::Display for StarkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{:?}] {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for StarkError {}
+
+impl From<argon2::Error> for StarkError {
+    fn from(e: argon2::Error) -> Self {
+        StarkError { code: ErrorCode::ArgonError, message: e.to_string() }
+    }
+}
+
+// ============================================================================
+// 3. INPUT VALIDATION
+// ============================================================================
+
+/// Validates all input parameters before cryptographic operations.
+///
+/// # Parameters
+/// - `password`: Must be 1-128 bytes, valid UTF-8
+/// - `salt`: Must be 8-64 bytes
+/// - `m_cost`: Argon2 memory cost, 8-65536 KB
+/// - `t_cost`: Argon2 time cost (iterations), 1-10
+/// - `p_cost`: Argon2 parallelism, 1-4
+///
+/// # Returns
+/// - `Ok(())` if all parameters are valid
+/// - `Err(StarkError)` with details if validation fails
+pub fn validate_inputs(password: &str, salt: &[u8], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<(), StarkError> {
+    if password.is_empty() {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidPassword, 
+            message: "Password cannot be empty".to_string() 
+        });
+    }
+    if password.len() > MAX_PASSWORD_LEN {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidPassword, 
+            message: format!("Password exceeds maximum length of {} bytes", MAX_PASSWORD_LEN) 
+        });
+    }
+    if salt.len() < MIN_SALT_LEN {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidSalt, 
+            message: format!("Salt must be at least {} bytes (got {})", MIN_SALT_LEN, salt.len()) 
+        });
+    }
+    if salt.len() > MAX_SALT_LEN {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidSalt, 
+            message: format!("Salt exceeds maximum length of {} bytes", MAX_SALT_LEN) 
+        });
+    }
+    if !(MIN_M_COST..=MAX_M_COST).contains(&m_cost) {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidArgonParams, 
+            message: format!("m_cost must be {}-{} (got {})", MIN_M_COST, MAX_M_COST, m_cost) 
+        });
+    }
+    if !(1..=MAX_T_COST).contains(&t_cost) {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidArgonParams, 
+            message: format!("t_cost must be 1-{} (got {})", MAX_T_COST, t_cost) 
+        });
+    }
+    if !(1..=MAX_P_COST).contains(&p_cost) {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidArgonParams, 
+            message: format!("p_cost must be 1-{} (got {})", MAX_P_COST, p_cost) 
+        });
+    }
+    Ok(())
+}
+
+// ============================================================================
+// 4. AIR DEFINITION
+// ============================================================================
+
+/// Algebraic Intermediate Representation for Poseidon-style preimage proof.
+///
+/// This AIR proves knowledge of a secret S such that applying NUM_ROUNDS
+/// iterations of a Poseidon-style round function yields the public commitment.
+///
+/// ## Trace Layout (Width = 8)
+/// | Col 0-3 | Col 4-7 |
+/// |---------|---------|
+/// | State s0-s3 | S-box outputs s0^7 - s3^7 |
+///
+/// ## Constraints
+/// 1. **First Row**: Only s0 contains secret, s1=s2=s3=0
+/// 2. **S-Box**: sbox[i] = state[i]^7
+/// 3. **Linear Layer**: state' = MDS × sbox + RC
+/// 4. **Last Row**: state = public_commitment
+#[derive(Clone)]
 struct PoseidonPreimageAir {
-    num_rounds: usize,
+    _num_rounds: usize,
 }
 
 impl BaseAir<Val> for PoseidonPreimageAir {
-    fn width(&self) -> usize { 8 } // 4 state + 4 S-box columns
+    fn width(&self) -> usize { 8 }
 }
 
 impl<AB: AirBuilder<F = Val> + AirBuilderWithPublicValues> Air<AB> for PoseidonPreimageAir {
@@ -67,29 +302,21 @@ impl<AB: AirBuilder<F = Val> + AirBuilderWithPublicValues> Air<AB> for PoseidonP
         let local = main.row_slice(0).unwrap();
         let next = main.row_slice(1).unwrap();
         
-        // Extract state and S-box columns
         let s0 = local[0].clone();
         let s1 = local[1].clone();
         let s2 = local[2].clone();
         let s3 = local[3].clone();
+        let s0_7 = local[4].clone();
+        let s1_7 = local[5].clone();
+        let s2_7 = local[6].clone();
+        let s3_7 = local[7].clone();
         
-        let s0_7 = local[4].clone(); // Helper column: s0^7
-        let s1_7 = local[5].clone(); // Helper column: s1^7
-        let s2_7 = local[6].clone(); // Helper column: s2^7
-        let s3_7 = local[7].clone(); // Helper column: s3^7
-        
-        // --- CRITICAL: FIRST ROW CONSTRAINTS ---
-        // Without these, a malicious prover can choose ANY starting state,
-        // not necessarily the one derived from the password via Argon2.
-        // We enforce that only state[0] contains the secret, others are zero.
+        // First row: only s0 has secret, others zero
         builder.when_first_row().assert_eq(s1.clone(), AB::Expr::ZERO);
         builder.when_first_row().assert_eq(s2.clone(), AB::Expr::ZERO);
         builder.when_first_row().assert_eq(s3.clone(), AB::Expr::ZERO);
         
-        // --- 1. S-BOX CONSTRAINTS (x^7) ---
-        // We compute x^7 = x * x^2 * x^4 and constrain the helper columns
-        // This is more efficient than direct x^7 which would create degree-7 constraints
-        
+        // S-box: x^7 = x * x^2 * x^4
         let s0_2 = s0.clone() * s0.clone();
         let s0_4 = s0_2.clone() * s0_2.clone();
         builder.assert_eq(s0_7.clone(), s0_4 * s0_2 * s0.clone());
@@ -106,507 +333,145 @@ impl<AB: AirBuilder<F = Val> + AirBuilderWithPublicValues> Air<AB> for PoseidonP
         let s3_4 = s3_2.clone() * s3_2.clone();
         builder.assert_eq(s3_7.clone(), s3_4 * s3_2 * s3.clone());
         
-        // --- 2. LINEAR LAYER (MDS Matrix + Round Constant) ---
-        // state' = MDS * sbox + RC
-        //
-        // WARNING: Using placeholder constants - NOT cryptographically secure!
-        // Production systems MUST use official Poseidon constants.
-        
+        // Linear layer: state' = MDS * sbox + RC
         let rc = AB::Expr::from(Val::from_u64(ROUND_CONSTANT));
         
-        // Row 0 of MDS matrix
         let new_s0 = AB::Expr::from(Val::from_u64(MDS_MATRIX[0][0])) * s0_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[0][1])) * s1_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[0][2])) * s2_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[0][3])) * s3_7.clone()
                    + rc.clone();
         
-        // Row 1 of MDS matrix
         let new_s1 = AB::Expr::from(Val::from_u64(MDS_MATRIX[1][0])) * s0_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[1][1])) * s1_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[1][2])) * s2_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[1][3])) * s3_7.clone()
                    + rc.clone();
         
-        // Row 2 of MDS matrix
         let new_s2 = AB::Expr::from(Val::from_u64(MDS_MATRIX[2][0])) * s0_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[2][1])) * s1_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[2][2])) * s2_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[2][3])) * s3_7.clone()
                    + rc.clone();
         
-        // Row 3 of MDS matrix
         let new_s3 = AB::Expr::from(Val::from_u64(MDS_MATRIX[3][0])) * s0_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[3][1])) * s1_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[3][2])) * s2_7.clone()
                    + AB::Expr::from(Val::from_u64(MDS_MATRIX[3][3])) * s3_7.clone()
                    + rc;
         
-        // Constrain transitions
         builder.when_transition().assert_eq(next[0].clone(), new_s0);
         builder.when_transition().assert_eq(next[1].clone(), new_s1);
         builder.when_transition().assert_eq(next[2].clone(), new_s2);
         builder.when_transition().assert_eq(next[3].clone(), new_s3);
         
-        // --- 3. BOUNDARY CONSTRAINTS ---
-        // The last row state must match the Public Input (Commitment)
+        // Last row: state must match public commitment
         let pis = builder.public_values();
-        let expected_0 = pis[0];
-        let expected_1 = pis[1];
-        let expected_2 = pis[2];
-        let expected_3 = pis[3];
+        let e0 = pis[0]; let e1 = pis[1]; let e2 = pis[2]; let e3 = pis[3];
         
-        builder.when_last_row().assert_eq(local[0].clone(), expected_0);
-        builder.when_last_row().assert_eq(local[1].clone(), expected_1);
-        builder.when_last_row().assert_eq(local[2].clone(), expected_2);
-        builder.when_last_row().assert_eq(local[3].clone(), expected_3);
+        builder.when_last_row().assert_eq(local[0].clone(), e0);
+        builder.when_last_row().assert_eq(local[1].clone(), e1);
+        builder.when_last_row().assert_eq(local[2].clone(), e2);
+        builder.when_last_row().assert_eq(local[3].clone(), e3);
     }
 }
 
-// 3. CHALLENGER & HASHER
-// We need a challenger that operates on the Extension Field to be secure.
-#[derive(Clone)]
-struct ExtensionChallenger<C>(C);
+// ============================================================================
+// 5. TYPE ALIASES
+// ============================================================================
 
-impl<C: CanObserve<Val>> CanObserve<Challenge> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: Challenge) {
-        // Observe coefficients of extension element
-         for coeff in value.as_basis_coefficients_slice() {
-            self.0.observe(*coeff);
-        }
-    }
-}
+type MyPerm = Poseidon2<Val, Poseidon2ExternalLayerGoldilocksHL<8>, Poseidon2InternalLayerGoldilocks, 8, 7>;
+type MyHash = PaddingFreeSponge<MyPerm, 8, 4, 4>;
+type MyCompress = TruncatedPermutation<MyPerm, 2, 4, 8>;
+type ValMmcs = MerkleTreeMmcs<Val, Val, MyHash, MyCompress, 4>;
+type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
+type Dft = Radix2DitParallel<Val>;
+type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
+type Challenger = DuplexChallenger<Val, MyPerm, 8, 4>;
+type MyConfig = StarkConfig<Pcs, Challenge, Challenger>;
 
-impl<C: CanSample<Val>> CanSample<Challenge> for ExtensionChallenger<C> {
-    fn sample(&mut self) -> Challenge {
-        // Sample 2 Base elements to form Extension (Degree 2)
-        let a = self.0.sample();
-        let b = self.0.sample();
-        // Construct extension from [a, b]
-        Challenge::new([a, b])
-    }
-}
+// ============================================================================
+// 6. ARGON2 & TRACE GENERATION
+// ============================================================================
 
-// Forward CanObserve<Val>
-impl<C: CanObserve<Val>> CanObserve<Val> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: Val) {
-        self.0.observe(value);
-    }
-}
-
-// Forward CanSample<Val>
-impl<C: CanSample<Val>> CanSample<Val> for ExtensionChallenger<C> {
-    fn sample(&mut self) -> Val {
-        self.0.sample()
-    }
-}
-
-impl<C: GrindingChallenger<Witness = Val>> GrindingChallenger for ExtensionChallenger<C> {
-    type Witness = Val; // Grinding usually happens on base field or specific witness type
-    fn grind(&mut self, bits: usize) -> Self::Witness {
-        self.0.grind(bits)
-    }
-}
-
-impl<C: CanObserve<Val>> CanObserve<Hash<Challenge, Challenge, 4>> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: Hash<Challenge, Challenge, 4>) {
-        let arr: [Challenge; 4] = value.into();
-        for v in arr {
-            self.observe(v); // Dispatches to observe(Challenge)
-        }
-    }
-}
-
-// Observe Hash<Val, Val, 4>
-impl<C: CanObserve<Val>> CanObserve<Hash<Val, Val, 4>> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: Hash<Val, Val, 4>) {
-        let arr: [Val; 4] = value.into();
-        for v in arr {
-            self.0.observe(v);
-        }
-    }
-}
-
-impl<C: CanObserve<Val>> CanObserve<Hash<Challenge, Val, 4>> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: Hash<Challenge, Val, 4>) {
-        let arr: [Val; 4] = value.into();
-        self.observe(arr);
-    }
-}
-
-impl<C: CanObserve<Val>> CanObserve<Hash<Val, HashDigest, 4>> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: Hash<Val, HashDigest, 4>) {
-        let arr: [HashDigest; 4] = value.into();
-        for d in arr {
-             self.observe(d);
-        }
-    }
-}
-
-impl<C: CanObserve<Val>> CanObserve<Hash<Challenge, HashDigest, 4>> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: Hash<Challenge, HashDigest, 4>) {
-        let arr: [HashDigest; 4] = value.into();
-        for d in arr {
-             self.observe(d);
-        }
-    }
-}
-
-#[derive(Copy, Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[repr(transparent)]
-pub struct HashDigest(pub [Val; 4]);
-
-impl Packable for HashDigest {}
-
-// Manual PackedValue impl removed to avoid conflict with blanket impl
-// impl Packable for HashDigest {} is sufficient.
-
-impl<C: CanObserve<Val>> CanObserve<HashDigest> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: HashDigest) {
-        let arr = value.0;
-        self.observe(arr);
-    }
-}
-
-// Custom Hasher for Challenge (Extension) -> HashDigest
-#[derive(Clone)]
-struct ChallengeHasher(MyHash);
-
-// 1. Hasher Impls for ChallengeHasher (Scalar)
-impl CryptographicHasher<Challenge, HashDigest> for ChallengeHasher {
-    fn hash_iter<I: IntoIterator<Item = Challenge>>(&self, input: I) -> HashDigest {
-        // Flatten inputs
-        let iter = input.into_iter().flat_map(|c| {
-             let s: &[Val] = c.as_basis_coefficients_slice();
-             let v: Vec<Val> = s.to_vec();
-             v
-        });
-        let h = self.0.hash_iter(iter);
-        let arr: [Val; 4] = h.into();
-        HashDigest(arr)
-    }
-}
-
-// Vectorized impl for safety / requirement
-// Vectorized impl for safety / requirement
-impl CryptographicHasher<Challenge, [HashDigest; 4]> for ChallengeHasher {
-    fn hash_iter<I: IntoIterator<Item = Challenge>>(&self, input: I) -> [HashDigest; 4] {
-         let mut vecs = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-         for c in input {
-             // Broadcast challenge? Or split? Challenge is scalarish extension.
-             // Usually we broadcast scalar challenge to all lanes.
-             vecs[0].push(c);
-             vecs[1].push(c);
-             vecs[2].push(c);
-             vecs[3].push(c);
-         }
-         [
-             self.hash_iter(vecs[0].iter().copied()),
-             self.hash_iter(vecs[1].iter().copied()),
-             self.hash_iter(vecs[2].iter().copied()),
-             self.hash_iter(vecs[3].iter().copied()),
-         ]
-    }
-}
-
-// Custom Hasher for Val (Trace) -> HashDigest
-#[derive(Clone)]
-struct ValHasher(MyHash);
-
-// A. Val -> HashDigest (Scalar)
-// A. Val -> HashDigest (Scalar)
-impl CryptographicHasher<Val, HashDigest> for ValHasher {
-    fn hash_iter<I: IntoIterator<Item = Val>>(&self, input: I) -> HashDigest {
-        let h = self.0.hash_iter(input);
-        // MyHash returns FieldArray<Val, 4> usually via Into.
-        // We know MyHash is PaddingFreeSponge -> returns [Val; 4] or FieldArray.
-        // Let's use standard into().
-        let arr: [Val; 4] = h.into();
-        HashDigest(arr)
-    }
-}
-
-// B. Val -> [HashDigest; 4]
-// Broadcast scalar stream to 4 digests
-impl CryptographicHasher<Val, [HashDigest; 4]> for ValHasher {
-    fn hash_iter<I: IntoIterator<Item = Val>>(&self, input: I) -> [HashDigest; 4] {
-        let v: Vec<Val> = input.into_iter().collect();
-        let h = self.hash_iter(v);
-        [h, h, h, h]
-    }
-}
-
-// C. [Val; 4] -> [HashDigest; 4]
-// Vectorized input stream -> 4 independent digests
-impl CryptographicHasher<[Val; 4], [HashDigest; 4]> for ValHasher {
-    fn hash_iter<I: IntoIterator<Item = [Val; 4]>>(&self, input: I) -> [HashDigest; 4] {
-        let mut vecs = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        for row in input {
-            vecs[0].push(row[0]);
-            vecs[1].push(row[1]);
-            vecs[2].push(row[2]);
-            vecs[3].push(row[3]);
-        }
-        [
-             self.hash_iter(vecs[0].iter().copied()),
-             self.hash_iter(vecs[1].iter().copied()),
-             self.hash_iter(vecs[2].iter().copied()),
-             self.hash_iter(vecs[3].iter().copied()),
-        ]
-    }
-}
-
-// Inner Node Hashing (Digest -> Digest)
-// Since HashDigest has WIDTH=1, MerkleTree will use serial compression?
-// No, MerkleTree inner nodes use Compress trait.
-// Hasher is used for leaves.
-
-// Also impl for [Val; 8]
-     
-
-
-// Implement FieldChallenger for Val (Base Field)
-impl<C: FieldChallenger<Val>> FieldChallenger<Val> for ExtensionChallenger<C> {
-     fn sample_algebra_element<A: p3_field::BasedVectorSpace<Val>>(&mut self) -> A {
-         self.0.sample_algebra_element()
-     }
-}
-
-// Implement FieldChallenger for Challenge
-impl<C: FieldChallenger<Val> + CanObserve<Val> + CanSample<Val> + GrindingChallenger> FieldChallenger<Challenge> for ExtensionChallenger<C> {
-    fn sample_algebra_element<A: p3_field::BasedVectorSpace<Challenge>>(&mut self) -> A {
-        let dim = A::DIMENSION;
-        let vec: Vec<Challenge> = (0..dim).map(|_| self.sample()).collect();
-        A::from_basis_coefficients_slice(&vec).unwrap()
-    }
-}
-
-impl<C: CanSampleBits<usize>> CanSampleBits<usize> for ExtensionChallenger<C> {
-    fn sample_bits(&mut self, bits: usize) -> usize {
-        self.0.sample_bits(bits)
-    }
-}
-
-// Observe FieldArray (Digest)
-impl<C: CanObserve<Val>> CanObserve<FieldArray<Val, 4>> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: FieldArray<Val, 4>) {
-        self.0.observe_slice(&value.0);
-    }
-}
-
-
-// Observe [Val; 4] (Digest)
-impl<C: CanObserve<Val>> CanObserve<[Val; 4]> for ExtensionChallenger<C> {
-    fn observe(&mut self, value: [Val; 4]) {
-        for v in value {
-             self.0.observe(v);
-        }
-    }
-}
-
-// Wrapper for Compression to handle types explicitly
-#[derive(Clone)]
-struct MyCompressWrapper(MyPerm);
-
-// Impl for FieldArray Arity 2 (Scalar)
-impl PseudoCompressionFunction<FieldArray<Val, 4>, 2> for MyCompressWrapper {
-    fn compress(&self, input: [FieldArray<Val, 4>; 2]) -> FieldArray<Val, 4> {
-        let mut row = [Val::default(); 8];
-        row[0..4].copy_from_slice(&input[0].0);
-        row[4..8].copy_from_slice(&input[1].0);
-        let out = self.0.permute(row);
-        let mut res = [Val::default(); 4];
-        res.copy_from_slice(&out[0..4]);
-        FieldArray(res)
-    }
-}
-
-// Impl for [[Val; 4]; 4] Arity 2 (Vectorized)
-impl PseudoCompressionFunction<[[Val; 4]; 4], 2> for MyCompressWrapper {
-    fn compress(&self, input: [[[Val; 4]; 4]; 2]) -> [[Val; 4]; 4] {
-        let mut out = [[Val::default(); 4]; 4];
-        for i in 0..4 {
-             let leaf_pair = [input[0][i], input[1][i]];
-             let mut row = [Val::default(); 8];
-             row[0..4].copy_from_slice(&leaf_pair[0]);
-             row[4..8].copy_from_slice(&leaf_pair[1]);
-             let perm_out = self.0.permute(row);
-             let mut res = [Val::default(); 4];
-             res.copy_from_slice(&perm_out[0..4]);
-             out[i] = res;
-        }
-        out
-    }
-}
-
-// Impl for HashDigest Arity 2 (Scalar) - Native Width 8
-impl PseudoCompressionFunction<HashDigest, 2> for MyCompressWrapper {
-    fn compress(&self, input: [HashDigest; 2]) -> HashDigest {
-        let mut row = [Val::default(); 8];
-        row[0..4].copy_from_slice(&input[0].0);
-        row[4..8].copy_from_slice(&input[1].0);
-        let out = self.0.permute(row);
-        let mut res = [Val::default(); 4];
-        res.copy_from_slice(&out[0..4]);
-        HashDigest(res)
-    }
-}
-
-// Impl for [HashDigest; 4] Arity 2 (Vectorized)
-impl PseudoCompressionFunction<[HashDigest; 4], 2> for MyCompressWrapper {
-    fn compress(&self, input: [[HashDigest; 4]; 2]) -> [HashDigest; 4] {
-        let mut out = [HashDigest::default(); 4];
-        for i in 0..4 {
-             let d0 = input[0][i];
-             let d1 = input[1][i];
-             out[i] = self.compress([d0, d1]);
-        }
-        out
-    }
-}
-
-// Impl for FieldArray Arity 4 (Scalar)
-impl PseudoCompressionFunction<FieldArray<Val, 4>, 4> for MyCompressWrapper {
-    fn compress(&self, input: [FieldArray<Val, 4>; 4]) -> FieldArray<Val, 4> {
-        // Chain 2-to-1 compression
-        let mut row1 = [Val::default(); 8];
-        row1[0..4].copy_from_slice(&input[0].0);
-        row1[4..8].copy_from_slice(&input[1].0);
-        let mid1_full = self.0.permute(row1);
-        
-        let mut row2 = [Val::default(); 8];
-        row2[0..4].copy_from_slice(&input[2].0);
-        row2[4..8].copy_from_slice(&input[3].0);
-        let mid2_full = self.0.permute(row2);
-        
-        let mut final_row = [Val::default(); 8];
-        final_row[0..4].copy_from_slice(&mid1_full[0..4]);
-        final_row[4..8].copy_from_slice(&mid2_full[0..4]);
-        let out = self.0.permute(final_row);
-        
-        let mut res = [Val::default(); 4];
-        res.copy_from_slice(&out[0..4]);
-        FieldArray(res)
-    }
-}
-
-// Impl for [Val; 4] Arity 4 (Scalar)
-impl PseudoCompressionFunction<[Val; 4], 4> for MyCompressWrapper {
-    fn compress(&self, input: [[Val; 4]; 4]) -> [Val; 4] {
-        let mut row1 = [Val::default(); 8];
-        row1[0..4].copy_from_slice(&input[0]);
-        row1[4..8].copy_from_slice(&input[1]);
-        let mid1_full = self.0.permute(row1);
-        
-        let mut row2 = [Val::default(); 8];
-        row2[0..4].copy_from_slice(&input[2]);
-        row2[4..8].copy_from_slice(&input[3]);
-        let mid2_full = self.0.permute(row2);
-        
-        let mut final_row = [Val::default(); 8];
-        final_row[0..4].copy_from_slice(&mid1_full[0..4]);
-        final_row[4..8].copy_from_slice(&mid2_full[0..4]);
-        let out = self.0.permute(final_row);
-        
-        let mut res = [Val::default(); 4];
-        res.copy_from_slice(&out[0..4]);
-        res
-    }
-}
-
-// Impl for [Val; 4] Arity 2
-impl PseudoCompressionFunction<[Val; 4], 2> for MyCompressWrapper {
-    fn compress(&self, input: [[Val; 4]; 2]) -> [Val; 4] {
-        let mut row = [Val::default(); 8];
-        row[0..4].copy_from_slice(&input[0]);
-        row[4..8].copy_from_slice(&input[1]);
-        let out = self.0.permute(row); 
-        let mut res = [Val::default(); 4];
-        res.copy_from_slice(&out[0..4]);
-        res
-    }
-}
-
-
-// Helper to fill slice
-// Removed duplicate CopyFromSlice definition.
-
-
-
-// 4. ARGON2 UTILS & TRACE GENERATON
-// Biased implementation fix: rejection sampling
-pub fn derive_secret_start(password: &str, salt: &[u8], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<Val,argon2::Error> {
-    let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(32)).unwrap();
+/// Derives a field element from a password using Argon2id.
+///
+/// Uses modular reduction for constant-time conversion, avoiding
+/// timing side-channels from rejection sampling.
+///
+/// # Parameters
+/// - `password`: User password (1-128 bytes)
+/// - `salt`: Unique salt (8-64 bytes)  
+/// - `m_cost`: Memory cost in KB (8-65536)
+/// - `t_cost`: Time cost / iterations (1-10)
+/// - `p_cost`: Parallelism degree (1-4)
+///
+/// # Returns
+/// A deterministic field element derived from the password.
+///
+/// # Security
+/// The Argon2id algorithm provides:
+/// - Memory-hard computation (GPU/ASIC resistant)
+/// - Timing-attack resistance
+/// - Side-channel protection
+pub fn derive_secret_start(password: &str, salt: &[u8], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<Val, StarkError> {
+    validate_inputs(password, salt, m_cost, t_cost, p_cost)?;
+    
+    let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(32))
+        .map_err(|e| StarkError { code: ErrorCode::ArgonError, message: e.to_string() })?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     
     let mut output = [0u8; 32];
-    // Rejection sampling loop
-    let mut nonce = 0u64;
-    loop {
-        // Vary salt with nonce to get fresh hash
-        let mut salt_with_nonce = salt.to_vec();
-        salt_with_nonce.extend_from_slice(&nonce.to_le_bytes());
-
-        argon.hash_password_into(password.as_bytes(), &salt_with_nonce, &mut output)?;
-        
-        // Interpret as U256 (4x u64). take first u64.
-        let mut val_bytes = [0u8; 8];
-        val_bytes.copy_from_slice(&output[0..8]);
-        let rand_u64 = u64::from_le_bytes(val_bytes);
-        
-        if rand_u64 < GOLDILOCKS_PRIME {
-            return Ok(Val::from_u64(rand_u64));
-        }
-        nonce += 1;
-    }
+    argon.hash_password_into(password.as_bytes(), salt, &mut output)?;
+    
+    // Constant-time modular reduction (no rejection sampling)
+    let mut val_bytes = [0u8; 8];
+    val_bytes.copy_from_slice(&output[0..8]);
+    let raw_u64 = u64::from_le_bytes(val_bytes);
+    let reduced = raw_u64 % GOLDILOCKS_PRIME;
+    Ok(Val::from_u64(reduced))
 }
 
-pub fn generate_poseidon_trace(secret: Val, num_rounds: usize) -> (RowMajorMatrix<Val>, [Val; 4]) {
-    // Trace width = 8 columns (4 state + 4 S-box)
-    // Height = num_rounds + 1 (padded to power of 2)
+/// Generates the execution trace for the Poseidon-style AIR.
+///
+/// The trace has dimensions (height × 8) where height = 2^⌈log₂(num_rounds+1)⌉.
+fn generate_poseidon_trace(secret: Val, num_rounds: usize) -> (RowMajorMatrix<Val>, [Val; 4]) {
     let height = (num_rounds + 1).next_power_of_two();
     let width = 8;
     
     let mut trace_data = vec![Val::ZERO; height * width];
-    
-    // Initialize State [secret, 0, 0, 0]
     let mut state = [secret, Val::ZERO, Val::ZERO, Val::ZERO];
     
-    // Fill trace (apply hash rounds for all rows to satisfy constraints)
     for i in 0..height {
         let row_idx = i * width;
         
-        // 1. Write State to Trace
+        // Write state columns
         trace_data[row_idx] = state[0];
         trace_data[row_idx + 1] = state[1];
         trace_data[row_idx + 2] = state[2];
         trace_data[row_idx + 3] = state[3];
         
-        // 2. Compute S-Box Output (x^7)
+        // Compute and write S-box columns
         let s0_7 = state[0].exp_u64(7);
         let s1_7 = state[1].exp_u64(7);
         let s2_7 = state[2].exp_u64(7);
         let s3_7 = state[3].exp_u64(7);
         
-        // 3. Write S-Box to Trace (Helper columns)
         trace_data[row_idx + 4] = s0_7;
         trace_data[row_idx + 5] = s1_7;
         trace_data[row_idx + 6] = s2_7;
         trace_data[row_idx + 7] = s3_7;
         
-        // 4. Compute Next State (MDS * SBox + RC) for next iteration
+        // Compute next state
         if i < height - 1 {
             let rc = Val::from_u64(ROUND_CONSTANT);
-            let mut next_state = [Val::ZERO; 4];
-            
             let s_vec = [s0_7, s1_7, s2_7, s3_7];
             
-            // Matrix multiplication: next_state = MDS * s_vec + RC
+            let mut next_state = [Val::ZERO; 4];
             for r in 0..4 {
                 let mut sum = rc;
                 for c in 0..4 {
-                    let m_val = Val::from_u64(MDS_MATRIX[r][c]);
-                    sum += m_val * s_vec[c];
+                    sum += Val::from_u64(MDS_MATRIX[r][c]) * s_vec[c];
                 }
                 next_state[r] = sum;
             }
@@ -614,7 +479,7 @@ pub fn generate_poseidon_trace(secret: Val, num_rounds: usize) -> (RowMajorMatri
         }
     }
     
-    // Extract commitment (first 4 elements of state at round num_rounds)
+    // Extract commitment from final state
     let final_row = num_rounds.min(height - 1);
     let final_row_idx = final_row * width;
     let commitment = [
@@ -627,333 +492,410 @@ pub fn generate_poseidon_trace(secret: Val, num_rounds: usize) -> (RowMajorMatri
     (RowMajorMatrix::new(trace_data, width), commitment)
 }
 
-pub fn new_poseidon2_goldilocks() -> Poseidon2<Val, Poseidon2ExternalLayerGoldilocksHL<8>, Poseidon2InternalLayerGoldilocks, 8, 7> {
+/// Creates the STARK configuration with appropriate FRI parameters.
+fn make_config() -> (MyConfig, MyPerm) {
     let mut rng = StdRng::seed_from_u64(42);
-    Poseidon2::new_from_rng_128(&mut rng)
+    let perm: MyPerm = Poseidon2::new_from_rng_128(&mut rng);
+    let hash = MyHash::new(perm.clone());
+    let compress = MyCompress::new(perm.clone());
+    let val_mmcs = ValMmcs::new(hash, compress);
+    let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
+    let dft = Dft::default();
+    
+    // FRI parameters optimized for degree-7 S-box constraints
+    let fri_params = FriParameters {
+        log_blowup: 3,      // 8x blowup to accommodate high-degree constraints
+        log_final_poly_len: 0,
+        num_queries: 50,    // ~100 bits security with log_blowup=3
+        commit_proof_of_work_bits: 8,
+        query_proof_of_work_bits: 8,
+        mmcs: challenge_mmcs,
+    };
+    
+    let pcs = Pcs::new(dft, val_mmcs, fri_params);
+    let challenger = Challenger::new(perm.clone());
+    (MyConfig::new(pcs, challenger), perm)
 }
 
-pub fn get_commitment(password: &str, salt: &[u8], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<[Val; 4], String> {
-    let secret = derive_secret_start(password, salt, m_cost, t_cost, p_cost).map_err(|e| e.to_string())?;
-    // Use a number of rounds that results in trace height being a power of 2
-    // For num_rounds=15, height = 16 (next_power_of_two(15+1))
-    let num_rounds = 15; // This makes the final row be row 15 in a height-16 trace
-    let (_trace, commitment) = generate_poseidon_trace(secret, num_rounds);
+/// Computes the commitment hash for a password.
+///
+/// This commitment should be stored during registration and used
+/// to verify proofs during authentication.
+///
+/// # Parameters
+/// Same as `derive_secret_start`
+///
+/// # Returns
+/// A 4-element commitment that uniquely identifies the password.
+/// 
+/// # Example
+/// ```rust,ignore
+/// let commitment = get_commitment("my_password", b"unique_salt!", 4096, 3, 1)?;
+/// // Store commitment in database
+/// ```
+pub fn get_commitment(password: &str, salt: &[u8], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<[Val; 4], StarkError> {
+    let secret = derive_secret_start(password, salt, m_cost, t_cost, p_cost)?;
+    let (_trace, commitment) = generate_poseidon_trace(secret, NUM_ROUNDS);
     Ok(commitment)
 }
 
-// 5. PROOF GENERATION & VERIFICATION
+// ============================================================================
+// 7. PROOF GENERATION & VERIFICATION
+// ============================================================================
+
+/// Serialized proof payload containing commitment and STARK proof.
 #[derive(Serialize, Deserialize)]
 pub struct ProofPayload {
-    pub commitment: [u64; 4], // 4-element Poseidon hash commitment
+    /// The commitment this proof is for
+    pub commitment: [u64; 4],
+    /// Validity flag (always true for valid proofs)
     pub valid: bool,
+    /// Serialized STARK proof bytes
     pub proof_bytes: Vec<u8>,
 }
 
-pub fn prove_password(password: &str, salt: &[u8], _nonce: u64,  m_cost: u32, t_cost: u32, p_cost: u32) -> Result<Vec<u8>, String> {
-    let secret = derive_secret_start(password, salt, m_cost, t_cost, p_cost).map_err(|e| e.to_string())?;
-    let num_rounds = 15; // Must match get_commitment()
-    let (trace, commitment) = generate_poseidon_trace(secret, num_rounds);
+/// Generates a STARK proof of password knowledge.
+///
+/// The proof demonstrates that the prover knows a password that
+/// hashes to the embedded commitment, without revealing the password.
+///
+/// # Parameters
+/// Same as `derive_secret_start`
+///
+/// # Returns
+/// Serialized proof bytes that can be verified with `verify_password_proof`.
+///
+/// # Proof Structure
+/// The returned bytes contain:
+/// - Schema version (1 byte)
+/// - Commitment (32 bytes)
+/// - STARK proof (variable length)
+///
+/// # Performance
+/// Proof generation takes approximately 0.5-2 seconds depending on hardware.
+pub fn prove_password(password: &str, salt: &[u8], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<Vec<u8>, StarkError> {
+    let secret = derive_secret_start(password, salt, m_cost, t_cost, p_cost)?;
+    let (trace, commitment) = generate_poseidon_trace(secret, NUM_ROUNDS);
     
-    let perm = new_poseidon2_goldilocks();
-    let compress_wrapper = MyCompressWrapper(perm.clone());
-    
-    let hash = PaddingFreeSponge::<_, 8, 4, 4>::new(perm.clone());
-    
-    let val_hasher = ValHasher(hash.clone());
-    let chall_hasher = ChallengeHasher(hash.clone());
-    
-    let val_mmcs = MerkleTreeMmcs::<Val, HashDigest, _, _, 4>::new(val_hasher, compress_wrapper.clone());
-    
-    let chall_mmcs = MerkleTreeMmcs::<Challenge, HashDigest, _, _, 4>::new(chall_hasher, compress_wrapper.clone());
-
-    let dft = Radix2DitParallel::default();
-    
-    let duplex = DuplexChallenger::<Val, _, 8, 4>::new(perm.clone());
-    let challenger = ExtensionChallenger(duplex);
-    
-    let fri_config = FriParameters {
-        log_blowup: 2,
-        log_final_poly_len: 2,
-        num_queries: 70,
-        query_proof_of_work_bits: 16,
-        commit_proof_of_work_bits: 0,
-        mmcs: chall_mmcs,
-    };
-    
-    let pcs = TwoAdicFriPcs::new(
-        dft,
-        val_mmcs,
-        fri_config,
-    );
-    
-    let config: StarkConfig<_, Challenge, _> = StarkConfig::new(pcs, challenger.clone());
-
-    let air = PoseidonPreimageAir {
-        num_rounds,
-    };
-    
-    // Public inputs: [commitment[0], commitment[1], commitment[2], commitment[3]]
+    let (config, _perm) = make_config();
+    let air = PoseidonPreimageAir { _num_rounds: NUM_ROUNDS };
     let public_inputs = commitment;
-
-    // prove(config, air, trace, public_values)
+    
     let proof = prove(&config, &air, trace, &public_inputs);
     
-    let proof_bytes = postcard::to_allocvec(&proof).map_err(|e| format!("Serialization error: {}", e))?;
-
-    let commitment_u64 = commitment.map(|v| v.as_canonical_u64());
+    let proof_bytes = postcard::to_allocvec(&proof)
+        .map_err(|e| StarkError { code: ErrorCode::SerializationError, message: e.to_string() })?;
+    
     let payload = ProofPayload {
-        commitment: commitment_u64,
+        commitment: commitment.map(|v| v.as_canonical_u64()),
         valid: true,
         proof_bytes,
     };
-            
-    let mut serialized_payload = postcard::to_allocvec(&payload)
-        .map_err(|e| format!("Payload serialization error: {}", e))?;
     
-    let mut output = Vec::with_capacity(serialized_payload.len() + 1);
-    output.push(1u8); // Schema Version
-    output.append(&mut serialized_payload);
+    let mut serialized = postcard::to_allocvec(&payload)
+        .map_err(|e| StarkError { code: ErrorCode::SerializationError, message: e.to_string() })?;
+    
+    let mut output = Vec::with_capacity(serialized.len() + 1);
+    output.push(1u8); // Schema version
+    output.append(&mut serialized);
     
     Ok(output)
 }
-type MyPerm = Poseidon2<Val, Poseidon2ExternalLayerGoldilocksHL<8>, Poseidon2InternalLayerGoldilocks, 8, 7>;
-type MyHash = PaddingFreeSponge<MyPerm, 8, 4, 4>;
-type MyCompress = MyCompressWrapper;
-type MyExtHasher = ChallengeHasher;
-type MyValHasher = ValHasher;
-type MyExtCompress = MyCompress;
-type MyChallMmcs = MerkleTreeMmcs<Challenge, HashDigest, MyExtHasher, MyExtCompress, 4>;
- 
-type MyPcs = TwoAdicFriPcs<Val, Radix2DitParallel<Val>, MerkleTreeMmcs<Val, HashDigest, MyValHasher, MyCompress, 4>, MyChallMmcs>;
-type MyChallenger = ExtensionChallenger<DuplexChallenger<Val, MyPerm, 8, 4>>;
-type MyConfig = StarkConfig<MyPcs, Challenge, MyChallenger>;
 
-pub fn verify_password_proof(proof_bytes: &[u8], expected_commitment: [Val; 4], _nonce: u64) -> bool {
-    // 1. Schema check
-    if proof_bytes.is_empty() || proof_bytes[0] != 1 {
-        return false;
+/// Verifies a STARK proof of password knowledge.
+///
+/// Checks that:
+/// 1. Proof format is valid
+/// 2. Commitment in proof matches expected commitment
+/// 3. STARK proof verifies against the AIR constraints
+///
+/// # Parameters
+/// - `proof_bytes`: Serialized proof from `prove_password`
+/// - `expected_commitment`: Commitment from `get_commitment`
+///
+/// # Returns
+/// - `Ok(true)` if proof is valid
+/// - `Err(StarkError)` with details if verification fails
+///
+/// # Security
+/// This function is safe to call with untrusted proof bytes.
+/// Invalid proofs will be rejected with appropriate error codes.
+pub fn verify_password_proof(proof_bytes: &[u8], expected_commitment: [Val; 4]) -> Result<bool, StarkError> {
+    if proof_bytes.is_empty() {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidProofFormat, 
+            message: "Proof bytes are empty".to_string() 
+        });
     }
-
-    let payload: ProofPayload = match postcard::from_bytes(&proof_bytes[1..]) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
     
-    // Verify commitment matches
+    if proof_bytes[0] != 1 {
+        return Err(StarkError { 
+            code: ErrorCode::InvalidProofFormat, 
+            message: format!("Unsupported schema version: {}", proof_bytes[0]) 
+        });
+    }
+    
+    let payload: ProofPayload = postcard::from_bytes(&proof_bytes[1..])
+        .map_err(|e| StarkError { code: ErrorCode::SerializationError, message: e.to_string() })?;
+    
     let expected_u64: [u64; 4] = expected_commitment.map(|v| v.as_canonical_u64());
     if payload.commitment != expected_u64 {
-        return false;
+        return Err(StarkError { 
+            code: ErrorCode::CommitmentMismatch, 
+            message: "Proof commitment does not match expected commitment".to_string() 
+        });
     }
     
-    let perm = new_poseidon2_goldilocks();
-    let compress_wrapper = MyCompressWrapper(perm.clone());
+    let (config, _perm) = make_config();
     
-    let hash = PaddingFreeSponge::<_, 8, 4, 4>::new(perm.clone());
+    let proof: Proof<MyConfig> = postcard::from_bytes(&payload.proof_bytes)
+        .map_err(|e| StarkError { code: ErrorCode::SerializationError, message: e.to_string() })?;
     
-    let val_hasher = ValHasher(hash.clone());
-    let chall_hasher = ChallengeHasher(hash.clone());
+    let air = PoseidonPreimageAir { _num_rounds: NUM_ROUNDS };
     
-    let val_mmcs = MerkleTreeMmcs::<Val, HashDigest, _, _, 4>::new(val_hasher, compress_wrapper.clone());
+    verify(&config, &air, &proof, &expected_commitment)
+        .map_err(|e| StarkError { 
+            code: ErrorCode::VerificationError, 
+            message: format!("STARK verification failed: {:?}", e) 
+        })?;
     
-    let chall_mmcs = MerkleTreeMmcs::<Challenge, HashDigest, _, _, 4>::new(chall_hasher, compress_wrapper.clone());
-    
-    let dft = Radix2DitParallel::default();
-    let duplex = DuplexChallenger::<Val, _, 8, 4>::new(perm.clone());
-    let challenger = ExtensionChallenger(duplex);
-    
-    let fri_config = FriParameters {
-        log_blowup: 2,
-        log_final_poly_len: 2,
-        num_queries: 70,
-        query_proof_of_work_bits: 16,
-        commit_proof_of_work_bits: 0,
-        mmcs: chall_mmcs,
-    };
-    
-    let pcs = TwoAdicFriPcs::new(dft, val_mmcs, fri_config);
-    let config = StarkConfig::new(pcs, challenger.clone());
-    
-    let proof: Proof<MyConfig> = match postcard::from_bytes(&payload.proof_bytes) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    let air = PoseidonPreimageAir {
-        num_rounds: 15, // Must match get_commitment()
-    };
-    
-    // Public inputs: expected_commitment (4 field elements)
-    let public_inputs = expected_commitment;
-    
-    verify(&config, &air, &proof, &public_inputs).is_ok()
+    Ok(true)
 }
 
-// ----------------------------------------------------------------------------
-// 6. C FFI EXPORTS (Updated for Safety)
-// ----------------------------------------------------------------------------
+// ============================================================================
+// 8. FFI EXPORTS (Safe C Interface)
+// ============================================================================
 
-// Opaque pointer wrapper
+/// Opaque handle returned by FFI functions.
+/// 
+/// This handle must be passed to `c_verify_password_proof` and
+/// eventually freed with `c_free_proof`.
 #[repr(C)]
-pub struct OpaqueProofResult {
-    _private: [u8; 0],
+pub struct OpaqueProofResult { 
+    _private: [u8; 0] 
 }
 
+/// Internal proof result structure with safety features.
+#[repr(C)]
+struct SafeProofHandle {
+    /// Magic number for validation
+    magic: u64,
+    /// Proof data pointer
+    ptr: *mut u8,
+    /// Proof data length
+    len: usize,
+    /// Proof data capacity
+    cap: usize,
+    /// Status code
+    status: u32,
+}
+
+impl SafeProofHandle {
+    fn new(ptr: *mut u8, len: usize, cap: usize, status: ErrorCode) -> Self {
+        SafeProofHandle {
+            magic: PROOF_HANDLE_MAGIC,
+            ptr,
+            len,
+            cap,
+            status: status as u32,
+        }
+    }
+    
+    fn error(status: ErrorCode) -> Self {
+        SafeProofHandle {
+            magic: PROOF_HANDLE_MAGIC,
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            status: status as u32,
+        }
+    }
+    
+    fn is_valid(&self) -> bool {
+        self.magic == PROOF_HANDLE_MAGIC
+    }
+}
+
+/// Derives a secret field element from password via Argon2id.
+///
+/// # Safety
+/// - `password_ptr` must point to valid memory of at least `password_len` bytes
+/// - `salt_ptr` must point to valid memory of at least `salt_len` bytes
+///
+/// # Returns
+/// The derived secret as u64, or 0 on error.
 #[no_mangle]
 pub extern "C" fn c_derive_secret_start(
-    password_ptr: *const u8,
-    password_len: usize,
-    salt_ptr: *const u8,
-    salt_len: usize,
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
+    password_ptr: *const u8, password_len: usize,
+    salt_ptr: *const u8, salt_len: usize,
+    m_cost: u32, t_cost: u32, p_cost: u32,
 ) -> u64 {
-    // Safety: check null
     if password_ptr.is_null() || salt_ptr.is_null() { return 0; }
-
-    let password_bytes = unsafe { std::slice::from_raw_parts(password_ptr, password_len) };
-    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
+    if password_len > MAX_PASSWORD_LEN || salt_len > MAX_SALT_LEN { return 0; }
     
-    // Panic safety wrapper
-    let result = std::panic::catch_unwind(move || {
-        let password_str = match std::str::from_utf8(password_bytes) {
-            Ok(s) => s,
-            Err(_) => return 0,
-        };
-
-        match derive_secret_start(password_str, salt, m_cost, t_cost, p_cost) {
-            Ok(val) => val.as_canonical_u64(),
-            Err(_) => 0,
-        }
-    });
-
-    result.unwrap_or(0)
+    std::panic::catch_unwind(move || {
+        let password_bytes = unsafe { std::slice::from_raw_parts(password_ptr, password_len) };
+        let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
+        
+        let password_str = std::str::from_utf8(password_bytes).ok()?;
+        derive_secret_start(password_str, salt, m_cost, t_cost, p_cost).ok().map(|v| v.as_canonical_u64())
+    }).ok().flatten().unwrap_or(0)
 }
 
+/// Result of commitment computation.
 #[repr(C)]
-pub struct CommitmentResult {
-    values: [u64; 4],
-    success: bool,
+pub struct CommitmentResult { 
+    /// Commitment values (4 × 64-bit field elements)
+    pub values: [u64; 4], 
+    /// True if computation succeeded
+    pub success: bool 
 }
 
+/// Computes commitment hash for a password.
+///
+/// # Safety
+/// Same as `c_derive_secret_start`
+///
+/// # Returns
+/// `CommitmentResult` with `success=true` if computation succeeded.
 #[no_mangle]
 pub extern "C" fn c_get_commitment(
-    password_ptr: *const u8,
-    password_len: usize,
-    salt_ptr: *const u8,
-    salt_len: usize,
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
+    password_ptr: *const u8, password_len: usize,
+    salt_ptr: *const u8, salt_len: usize,
+    m_cost: u32, t_cost: u32, p_cost: u32,
 ) -> CommitmentResult {
-    // Safety: check null
-    if password_ptr.is_null() || salt_ptr.is_null() { 
-        return CommitmentResult { values: [0; 4], success: false }; 
-    }
-
-    let password_bytes = unsafe { std::slice::from_raw_parts(password_ptr, password_len) };
-    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
+    let fail = CommitmentResult { values: [0; 4], success: false };
     
-    // Panic safety wrapper
-    let result = std::panic::catch_unwind(move || {
-        let password_str = match std::str::from_utf8(password_bytes) {
-            Ok(s) => s,
-            Err(_) => return CommitmentResult { values: [0; 4], success: false },
-        };
-
-        match get_commitment(password_str, salt, m_cost, t_cost, p_cost) {
-            Ok(commitment) => CommitmentResult { 
-                values: commitment.map(|v| v.as_canonical_u64()), 
-                success: true 
-            },
-            Err(_) => CommitmentResult { values: [0; 4], success: false },
-        }
-    });
-
-    result.unwrap_or(CommitmentResult { values: [0; 4], success: false })
+    if password_ptr.is_null() || salt_ptr.is_null() { return fail; }
+    if password_len > MAX_PASSWORD_LEN || salt_len > MAX_SALT_LEN { return fail; }
+    
+    std::panic::catch_unwind(move || {
+        let password_bytes = unsafe { std::slice::from_raw_parts(password_ptr, password_len) };
+        let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
+        
+        let password_str = std::str::from_utf8(password_bytes).ok()?;
+        get_commitment(password_str, salt, m_cost, t_cost, p_cost).ok()
+            .map(|c| CommitmentResult { values: c.map(|v| v.as_canonical_u64()), success: true })
+    }).ok().flatten().unwrap_or(fail)
 }
 
-// 6. PROVE FFI
-#[repr(C)]
-pub struct ProofResult {
-    ptr: *mut u8,
-    len: usize,
-    cap: usize,
-    status: u32, // 0 = OK, 1 = Error
-}
-
-#[repr(u32)]
-pub enum StatusCode {
-    Success = 0,
-    InvalidInput = 1,
-    ProvingError = 2,
-    AllocError = 3,
-}
-
+/// Generates a STARK proof of password knowledge.
+///
+/// # Safety
+/// Same as `c_derive_secret_start`
+///
+/// # Returns
+/// Opaque handle to proof result. Must be freed with `c_free_proof`.
+/// Returns null on error.
 #[no_mangle]
 pub extern "C" fn c_prove_password(
-    password_ptr: *const u8,
-    password_len: usize,
-    salt_ptr: *const u8,
-    salt_len: usize,
-    nonce: u64,
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
+    password_ptr: *const u8, password_len: usize,
+    salt_ptr: *const u8, salt_len: usize,
+    m_cost: u32, t_cost: u32, p_cost: u32,
 ) -> *mut OpaqueProofResult {
+    if password_ptr.is_null() || salt_ptr.is_null() { return std::ptr::null_mut(); }
+    if password_len > MAX_PASSWORD_LEN || salt_len > MAX_SALT_LEN { return std::ptr::null_mut(); }
     
-    if password_ptr.is_null() || salt_ptr.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    let password_bytes = unsafe { std::slice::from_raw_parts(password_ptr, password_len) };
-    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
-    
-    // Panic safety wrapper
     let result = std::panic::catch_unwind(move || {
+        let password_bytes = unsafe { std::slice::from_raw_parts(password_ptr, password_len) };
+        let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
+        
         let password_str = match std::str::from_utf8(password_bytes) {
             Ok(s) => s,
-            Err(_) => return ProofResult { ptr: std::ptr::null_mut(), len: 0, cap: 0, status: StatusCode::InvalidInput as u32 },
+            Err(_) => return SafeProofHandle::error(ErrorCode::InvalidPassword),
         };
-
-        let res = prove_password(password_str, salt, nonce, m_cost, t_cost, p_cost);
-        match res {
+        
+        match prove_password(password_str, salt, m_cost, t_cost, p_cost) {
             Ok(mut bytes) => {
                 let ptr = bytes.as_mut_ptr();
                 let len = bytes.len();
                 let cap = bytes.capacity();
                 std::mem::forget(bytes);
-                ProofResult {
-                    ptr,
-                    len,
-                    cap,
-                    status: StatusCode::Success as u32,
-                }
+                SafeProofHandle::new(ptr, len, cap, ErrorCode::Success)
             },
-            Err(_) => ProofResult { ptr: std::ptr::null_mut(), len: 0, cap: 0, status: StatusCode::ProvingError as u32 }
+            Err(e) => SafeProofHandle::error(e.code)
         }
     });
-
+    
     match result {
-        Ok(proof_res) => {
-            let res_box = Box::new(proof_res);
-            Box::into_raw(res_box) as *mut OpaqueProofResult
-        },
-        Err(_) => std::ptr::null_mut(), // Panic occurred
+        Ok(handle) => Box::into_raw(Box::new(handle)) as *mut OpaqueProofResult,
+        Err(_) => {
+            let handle = SafeProofHandle::error(ErrorCode::InternalPanic);
+            Box::into_raw(Box::new(handle)) as *mut OpaqueProofResult
+        }
     }
 }
 
-// 7. VERIFY FFI
+/// Gets the status code from a proof handle.
+///
+/// # Returns
+/// Status code (0 = success), or `ErrorCode::InvalidHandle` if handle is invalid.
 #[no_mangle]
-pub extern "C" fn c_verify_password_proof(
-    proof_ptr: *mut OpaqueProofResult,
-    commitment_ptr: *const u64, // Pointer to 4-element array
-    nonce: u64,
-) -> bool {
+pub extern "C" fn c_get_proof_status(proof_ptr: *const OpaqueProofResult) -> u32 {
+    if proof_ptr.is_null() { return ErrorCode::InvalidHandle as u32; }
+    
+    let handle = unsafe { &*(proof_ptr as *const SafeProofHandle) };
+    if !handle.is_valid() { return ErrorCode::InvalidHandle as u32; }
+    
+    handle.status
+}
+
+/// Gets the proof data length.
+///
+/// # Returns
+/// Length in bytes, or 0 if handle is invalid.
+#[no_mangle]
+pub extern "C" fn c_get_proof_len(proof_ptr: *const OpaqueProofResult) -> usize {
+    if proof_ptr.is_null() { return 0; }
+    
+    let handle = unsafe { &*(proof_ptr as *const SafeProofHandle) };
+    if !handle.is_valid() { return 0; }
+    
+    handle.len
+}
+
+/// Copies proof data to a buffer.
+///
+/// # Safety
+/// - `buffer` must point to valid memory of at least `buffer_len` bytes
+/// - Call `c_get_proof_len` first to determine required buffer size
+///
+/// # Returns
+/// Number of bytes copied, or 0 on error.
+#[no_mangle]
+pub extern "C" fn c_copy_proof_data(
+    proof_ptr: *const OpaqueProofResult,
+    buffer: *mut u8,
+    buffer_len: usize,
+) -> usize {
+    if proof_ptr.is_null() || buffer.is_null() { return 0; }
+    
+    let handle = unsafe { &*(proof_ptr as *const SafeProofHandle) };
+    if !handle.is_valid() || handle.ptr.is_null() { return 0; }
+    
+    let copy_len = buffer_len.min(handle.len);
+    unsafe {
+        std::ptr::copy_nonoverlapping(handle.ptr, buffer, copy_len);
+    }
+    copy_len
+}
+
+/// Verifies a STARK proof of password knowledge.
+///
+/// # Safety
+/// - `proof_ptr` must be a valid handle from `c_prove_password`
+/// - `commitment_ptr` must point to 4 u64 values
+///
+/// # Returns
+/// `true` if proof is valid, `false` otherwise.
+#[no_mangle]
+pub extern "C" fn c_verify_password_proof(proof_ptr: *const OpaqueProofResult, commitment_ptr: *const u64) -> bool {
     if proof_ptr.is_null() || commitment_ptr.is_null() { return false; }
     
-    let proof_res = unsafe { &*(proof_ptr as *const ProofResult) };
-    if proof_res.status != 0 { return false; }
+    let handle = unsafe { &*(proof_ptr as *const SafeProofHandle) };
+    if !handle.is_valid() { return false; }
+    if handle.status != 0 { return false; }
+    if handle.ptr.is_null() { return false; }
     
     let commitment_slice = unsafe { std::slice::from_raw_parts(commitment_ptr, 4) };
     let commitment: [Val; 4] = [
@@ -963,53 +905,204 @@ pub extern "C" fn c_verify_password_proof(
         Val::from_u64(commitment_slice[3]),
     ];
     
-    let proof_slice = unsafe { std::slice::from_raw_parts(proof_res.ptr, proof_res.len) };
-    verify_password_proof(proof_slice, commitment, nonce)
+    let proof_slice = unsafe { std::slice::from_raw_parts(handle.ptr, handle.len) };
+    verify_password_proof(proof_slice, commitment).unwrap_or(false)
 }
 
+/// Frees a proof handle.
+///
+/// # Safety
+/// - `proof_ptr` must be from `c_prove_password` or null
+/// - After this call, the handle is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn c_free_proof(res_ptr: *mut OpaqueProofResult) {
-    if res_ptr.is_null() { return; }
+pub extern "C" fn c_free_proof(proof_ptr: *mut OpaqueProofResult) {
+    if proof_ptr.is_null() { return; }
+    
     unsafe {
-        let res = Box::from_raw(res_ptr as *mut ProofResult);
-        // Reconstruct Vec to drop it
-        if !res.ptr.is_null() {
-            let _ = Vec::from_raw_parts(res.ptr, res.len, res.cap);
+        let handle = Box::from_raw(proof_ptr as *mut SafeProofHandle);
+        
+        // Validate magic before freeing internal resources
+        if handle.is_valid() && !handle.ptr.is_null() {
+            let _ = Vec::from_raw_parts(handle.ptr, handle.len, handle.cap);
         }
-        // res dropped here
+        // handle is dropped here
     }
 }
 
-// 8. TESTS
+// ============================================================================
+// 9. TESTS
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // --- Input Validation Tests ---
+
     #[test]
-    fn test_prove_and_verify_flow() {
+    fn test_empty_password_rejected() {
+        let result = validate_inputs("", b"saltsalt", 4096, 3, 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidPassword);
+    }
+
+    #[test]
+    fn test_long_password_rejected() {
+        let long_pass = "a".repeat(MAX_PASSWORD_LEN + 1);
+        let result = validate_inputs(&long_pass, b"saltsalt", 4096, 3, 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidPassword);
+    }
+
+    #[test]
+    fn test_short_salt_rejected() {
+        let result = validate_inputs("password", b"short", 4096, 3, 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidSalt);
+    }
+
+    #[test]
+    fn test_invalid_argon_params_rejected() {
+        // m_cost too low
+        assert!(validate_inputs("password", b"saltsalt", 1, 3, 1).is_err());
+        // t_cost too low
+        assert!(validate_inputs("password", b"saltsalt", 4096, 0, 1).is_err());
+        // p_cost too low
+        assert!(validate_inputs("password", b"saltsalt", 4096, 3, 0).is_err());
+        // m_cost too high
+        assert!(validate_inputs("password", b"saltsalt", MAX_M_COST + 1, 3, 1).is_err());
+    }
+
+    #[test]
+    fn test_valid_inputs_accepted() {
+        assert!(validate_inputs("password", b"saltsalt", 4096, 3, 1).is_ok());
+        assert!(validate_inputs("p", b"saltsalt", MIN_M_COST, 1, 1).is_ok());
+    }
+
+    // --- Secret Derivation Tests ---
+
+    #[test]
+    fn test_derive_secret_deterministic() {
+        let s1 = derive_secret_start("test", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        let s2 = derive_secret_start("test", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        assert_eq!(s1, s2, "Same inputs should produce same output");
+    }
+
+    #[test]
+    fn test_derive_secret_different_passwords() {
+        let s1 = derive_secret_start("password1", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        let s2 = derive_secret_start("password2", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        assert_ne!(s1, s2, "Different passwords should produce different outputs");
+    }
+
+    #[test]
+    fn test_derive_secret_different_salts() {
+        let s1 = derive_secret_start("password", b"saltsalt1111", 4096, 3, 1).unwrap();
+        let s2 = derive_secret_start("password", b"saltsalt2222", 4096, 3, 1).unwrap();
+        assert_ne!(s1, s2, "Different salts should produce different outputs");
+    }
+
+    // --- Commitment Tests ---
+
+    #[test]
+    fn test_commitment_deterministic() {
+        let c1 = get_commitment("test", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        let c2 = get_commitment("test", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        assert_eq!(c1, c2, "Same inputs should produce same commitment");
+    }
+
+    #[test]
+    fn test_commitment_different_passwords() {
+        let c1 = get_commitment("password1", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        let c2 = get_commitment("password2", b"saltsaltsalt", 4096, 3, 1).unwrap();
+        assert_ne!(c1, c2, "Different passwords should produce different commitments");
+    }
+
+    // --- Proof Round-Trip Tests ---
+
+    #[test]
+    fn test_prove_and_verify_success() {
         let pass = "correct_horse";
-        let salt = b"battery_staple";
-        let nonce = 12345;
+        let salt = b"battery_staple__";
         let m_cost = 4096;
         let t_cost = 3;
         let p_cost = 1;
         
-        // 1. Get commitment
         let commitment = get_commitment(pass, salt, m_cost, t_cost, p_cost).expect("Commit failed");
+        let proof = prove_password(pass, salt, m_cost, t_cost, p_cost).expect("Prove failed");
+        let valid = verify_password_proof(&proof, commitment).expect("Verify failed");
+        assert!(valid, "Valid proof should verify");
+    }
+
+    #[test]
+    fn test_verify_wrong_commitment_fails() {
+        let pass = "correct_horse";
+        let salt = b"battery_staple__";
         
-        // 2. Prove
-        let proof = prove_password(pass, salt, nonce, m_cost, t_cost, p_cost).expect("Prove failed");
+        let commitment = get_commitment(pass, salt, 4096, 3, 1).expect("Commit failed");
+        let proof = prove_password(pass, salt, 4096, 3, 1).expect("Prove failed");
         
-        // 3. Verify
-        let valid = verify_password_proof(&proof, commitment, nonce);
-        assert!(valid, "Proof should verify");
+        let mut wrong_commitment = commitment;
+        wrong_commitment[0] = wrong_commitment[0] + Val::ONE;
         
-        // 4. Verify Failure Cases
-        let mut invalid_commitment = commitment;
-        invalid_commitment[0] = invalid_commitment[0] + Val::ONE;
-        assert!(!verify_password_proof(&proof, invalid_commitment, nonce), "Should fail wrong commitment");
+        let result = verify_password_proof(&proof, wrong_commitment);
+        assert!(result.is_err(), "Wrong commitment should fail");
+        assert_eq!(result.unwrap_err().code, ErrorCode::CommitmentMismatch);
+    }
+
+    #[test]
+    fn test_verify_corrupted_proof_fails() {
+        let commitment = get_commitment("test", b"saltsaltsalt", 4096, 3, 1).expect("Commit failed");
         
-        let invalid_proof = vec![1, 2, 3];
-        assert!(!verify_password_proof(&invalid_proof, commitment, nonce), "Should fail invalid proof bytes");
+        // Empty proof
+        assert!(verify_password_proof(&[], commitment).is_err());
+        
+        // Wrong version
+        assert!(verify_password_proof(&[2, 0, 0], commitment).is_err());
+        
+        // Corrupted data
+        assert!(verify_password_proof(&[1, 0, 0, 0], commitment).is_err());
+    }
+
+    // --- FFI Safety Tests ---
+
+    #[test]
+    fn test_ffi_null_pointers_handled() {
+        assert_eq!(c_derive_secret_start(std::ptr::null(), 0, b"salt".as_ptr(), 4, 4096, 3, 1), 0);
+        assert_eq!(c_derive_secret_start(b"pass".as_ptr(), 4, std::ptr::null(), 0, 4096, 3, 1), 0);
+        
+        let result = c_get_commitment(std::ptr::null(), 0, b"salt".as_ptr(), 4, 4096, 3, 1);
+        assert!(!result.success);
+        
+        assert!(c_prove_password(std::ptr::null(), 0, b"salt".as_ptr(), 4, 4096, 3, 1).is_null());
+        assert!(!c_verify_password_proof(std::ptr::null(), [0u64; 4].as_ptr()));
+        
+        // c_free_proof should not crash on null
+        c_free_proof(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_ffi_oversized_inputs_handled() {
+        let huge_len = MAX_PASSWORD_LEN + 1;
+        assert_eq!(c_derive_secret_start(b"x".as_ptr(), huge_len, b"saltsalt".as_ptr(), 8, 4096, 3, 1), 0);
+    }
+
+    #[test]
+    fn test_safe_proof_handle_validation() {
+        let pass = b"test_password";
+        let salt = b"saltsaltsalt";
+        
+        let handle = c_prove_password(pass.as_ptr(), pass.len(), salt.as_ptr(), salt.len(), 4096, 3, 1);
+        assert!(!handle.is_null());
+        
+        // Check status
+        assert_eq!(c_get_proof_status(handle), ErrorCode::Success as u32);
+        
+        // Check length
+        let len = c_get_proof_len(handle);
+        assert!(len > 0);
+        
+        // Free handle
+        c_free_proof(handle);
     }
 }

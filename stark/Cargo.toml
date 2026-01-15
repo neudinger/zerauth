@@ -2,6 +2,10 @@
 name = "stark-password-proof"
 version = "0.1.0"
 edition = "2021"
+description = "Zero-knowledge proof library for password authentication using STARK proofs"
+readme = "README.md"
+keywords = ["cryptography", "stark", "zero-knowledge", "password", "proof"]
+categories = ["cryptography", "authentication"]
 
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]
