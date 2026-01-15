@@ -78,6 +78,14 @@ impl<AB: AirBuilder<F = Val> + AirBuilderWithPublicValues> Air<AB> for PoseidonP
         let s2_7 = local[6].clone(); // Helper column: s2^7
         let s3_7 = local[7].clone(); // Helper column: s3^7
         
+        // --- CRITICAL: FIRST ROW CONSTRAINTS ---
+        // Without these, a malicious prover can choose ANY starting state,
+        // not necessarily the one derived from the password via Argon2.
+        // We enforce that only state[0] contains the secret, others are zero.
+        builder.when_first_row().assert_eq(s1.clone(), AB::Expr::ZERO);
+        builder.when_first_row().assert_eq(s2.clone(), AB::Expr::ZERO);
+        builder.when_first_row().assert_eq(s3.clone(), AB::Expr::ZERO);
+        
         // --- 1. S-BOX CONSTRAINTS (x^7) ---
         // We compute x^7 = x * x^2 * x^4 and constrain the helper columns
         // This is more efficient than direct x^7 which would create degree-7 constraints
@@ -101,8 +109,8 @@ impl<AB: AirBuilder<F = Val> + AirBuilderWithPublicValues> Air<AB> for PoseidonP
         // --- 2. LINEAR LAYER (MDS Matrix + Round Constant) ---
         // state' = MDS * sbox + RC
         //
-        // MDS[0] = [2, 3, 1, 1]
-        // new_s0 = 2*s0_7 + 3*s1_7 + 1*s2_7 + 1*s3_7 + RC
+        // WARNING: Using placeholder constants - NOT cryptographically secure!
+        // Production systems MUST use official Poseidon constants.
         
         let rc = AB::Expr::from(Val::from_u64(ROUND_CONSTANT));
         
