@@ -59,13 +59,16 @@ pub fn main(process_init: std.process.Init) !void {
     defer _ = general_purpose_allocator.deinit();
     const allocator = general_purpose_allocator.allocator();
 
-    var prover = try zone.LatticeZKP.init(allocator, process_init.io);
+    var seed: [32]u8 = undefined;
+    try process_init.io.randomSecure(&seed);
+
+    var prover = try zone.LatticeZKP.init(allocator, seed);
     defer prover.deinit();
 
     // 3. Registration Phase
     try standard_output.print("\n=== 1. REGISTRATION PHASE ===\n", .{});
-    const password = "UserPassword123!";
-    const salt_string = "RandomSaltValue";
+    const password = "password";
+    const salt_string = "saltsalt";
 
     // Prover derives Secret Key (s) and Public Key (t)
     const public_key_t = try prover.derive_secret(password, salt_string, process_init.io);

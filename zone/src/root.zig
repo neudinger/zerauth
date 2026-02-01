@@ -3,6 +3,8 @@ const mem = std.mem;
 const crypto = std.crypto;
 const Io = std.Io;
 
+const log = std.log.scoped(.root);
+
 pub fn printAnotherMessage(writer: anytype) !void {
     try writer.print("Run `zig build test` to run the tests.\n", .{});
 }
@@ -23,34 +25,21 @@ pub const LatticeZKP = struct {
     pub const modulus_q: i32 = 1 << 23;
     pub const modulus_limit: i32 = modulus_q - 1;
     // Rejection sampling bound (simplified)
-    pub const rejection_limit: i32 = 1 << 14;
+    // Rejection sampling bound (simplified)
+    pub const rejection_limit: i32 = 1 << 17;
+    // Smallness parameter for secret key and noise
+    pub const eta: i32 = 2;
 
     // Type aliases for clarity
     const VectorContainerTypeN = [dimension_secret_n]i32;
 
-    pub fn init(backing_allocator: std.mem.Allocator, io_context: Io) !*LatticeZKP {
+    pub fn init(backing_allocator: std.mem.Allocator, seed: [32]u8) !*LatticeZKP {
         const self = try backing_allocator.create(LatticeZKP);
         self.allocator = backing_allocator;
         self.secret_key_s = null;
         self.internal_mask_y = null;
 
-        // Initialize CSPRNG with system entropy (read /dev/urandom)
-        var seed: [32]u8 = undefined;
-        {
-            var urandom_file = try Io.Dir.openFileAbsolute(io_context, "/dev/urandom", .{});
-            defer urandom_file.close(io_context);
-
-            // Read seed using readStreaming loop
-            var offset: usize = 0;
-            while (offset < seed.len) {
-                var iov = [_][]u8{seed[offset..]};
-                const bytes_read = try urandom_file.readStreaming(io_context, &iov);
-                if (bytes_read == 0) return error.UnexpectedEof;
-                offset += bytes_read;
-            }
-        }
         self.prng = std.Random.DefaultCsprng.init(seed);
-
         // Allocate Matrix A (Mock generation)
         self.a_matrix = try backing_allocator.alloc(i32, dimension_secret_n * dimension_public_m);
 
@@ -76,10 +65,10 @@ pub const LatticeZKP = struct {
     pub fn derive_secret(self: *LatticeZKP, password: []const u8, salt: []const u8, io_context: Io) ![]i32 {
         var seed: [32]u8 = undefined;
         // Use Argon2id for password hashing / KDF
-        // Parameters: t=2, m=19MB, p=1 (OWASP recommendations, scaled down for demo speed)
+        // Parameters: t=2, m=64MB, p=1 (Matched with C++ OpenSSL implementation)
         var argon2_params = crypto.pwhash.argon2.Params.owasp_2id;
         argon2_params.t = 2; // Lower computation for demo
-        argon2_params.m = 1024; // Lower memory for demo
+        argon2_params.m = 65536; // 64MB (C++ uses 65536 KB)
 
         try crypto.pwhash.argon2.kdf(
             self.allocator,
@@ -100,8 +89,8 @@ pub const LatticeZKP = struct {
         const secret_key_s_local = try self.allocator.alloc(i32, dimension_secret_n);
 
         for (secret_key_s_local) |*coefficient| {
-            // Random in [-2, 2]
-            coefficient.* = secret_random.intRangeAtMost(i32, -2, 2);
+            // Random in [-eta, eta]
+            coefficient.* = secret_random.intRangeAtMost(i32, -eta, eta);
         }
 
         // Store 's' in self for later ZKP steps
@@ -126,7 +115,7 @@ pub const LatticeZKP = struct {
         const random = self.prng.random();
         for (ephemeral_mask_y) |*mask_value| {
             // Range significantly larger than challenge * s range
-            mask_value.* = random.intRangeLessThan(i32, -rejection_limit, rejection_limit);
+            mask_value.* = random.intRangeAtMost(i32, -rejection_limit, rejection_limit);
         }
 
         // Store y
@@ -156,7 +145,7 @@ pub const LatticeZKP = struct {
             const val_calc = internal_mask_y_local[loop_idx] + challenge_c * secret_key_s_local[loop_idx];
             // Rejection sampling check: |z| should be < B - limit
             // Simplistic check
-            if (val_calc > (rejection_limit - 100) or val_calc < (-rejection_limit + 100)) {
+            if (val_calc > (rejection_limit - eta) or val_calc < (-rejection_limit + eta)) {
                 is_valid = false;
             }
             response_val.* = val_calc;

@@ -142,6 +142,34 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // WASM Build Step
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/wasm.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm_mod.addImport("zone", mod);
+
+    const wasm_exe = b.addExecutable(.{
+        .name = "zone",
+        .root_module = wasm_mod,
+    });
+
+    wasm_exe.entry = .disabled;
+    wasm_exe.rdynamic = true; // Export symbols
+
+    const wasm_install = b.addInstallArtifact(wasm_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+
+    const wasm_step = b.step("wasm", "Build for WASM");
+    wasm_step.dependOn(&wasm_install.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

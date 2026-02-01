@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Zig Lattice ZKP WASM Demo</title>
+    <style>
+        body {
+            font-family: monospace;
+            background: #1a1a1a;
+            color: #0f0;
+            padding: 20px;
+        }
+
+        button {
+            padding: 10px;
+            cursor: pointer;
+            background: #333;
+            color: #fff;
+            border: 1px solid #0f0;
+        }
+
+        #log {
+            white-space: pre-wrap;
+            margin-top: 20px;
+            border-top: 1px solid #333;
+            padding-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Lattice ZKP (Zig WASM)</h1>
+    <div>
+        <button onclick="runProtocol()">Run ZKP Protocol</button>
+    </div>
+    <div id="status">Loading WASM...</div>
+    <div id="log"></div>
+
+    <script>
+        let wasm = null;
+        let memory = null;
+        let ctx = null;
+
+        // Minimal WASI Shim
+        const wasi = {
+            args_sizes_get: () => 0,
+            args_get: () => 0,
+            environ_sizes_get: () => 0,
+            environ_get: () => 0,
+            clock_time_get: () => 0,
+            fd_write: (fd, iovs, iovsLen, nwritten) => {
+                const view = new DataView(memory.buffer);
+                let written = 0;
+                // very simple console log mapping
+                for (let i = 0; i < iovsLen; i++) {
+                    const ptr = view.getUint32(iovs + i * 8, true);
+                    const len = view.getUint32(iovs + i * 8 + 4, true);
+                    const buf = new Uint8Array(memory.buffer, ptr, len);
+                    const str = new TextDecoder().decode(buf);
+                    console.log(`[WASI fd:${fd}]`, str);
+                    written += len;
+                }
+                view.setUint32(nwritten, written, true);
+                return 0; // ES_SUCCESS
+            },
+            fd_close: () => 0,
+            fd_seek: () => 0,
+            proc_exit: (r) => { console.log("proc_exit", r); },
+            random_get: (buf, buf_len) => {
+                const arr = new Uint8Array(memory.buffer, buf, buf_len);
+                crypto.getRandomValues(arr);
+                return 0;
+            }
+        };
+
+        // Load WASM
+        async function loadWasm() {
+            try {
+                const response = await fetch('zone.wasm');
+                const bytes = await response.arrayBuffer();
+                const { instance } = await WebAssembly.instantiate(bytes, {
+                    env: {},
+                    wasi_snapshot_preview1: wasi
+                });
+                wasm = instance.exports;
+                memory = wasm.memory;
+                document.getElementById('status').innerText = "WASM Loaded. Ready.";
+                console.log("WASM Exports:", wasm);
+            } catch (e) {
+                log("Error loading WASM: " + e);
+            }
+        }
+
+        function log(msg) {
+            document.getElementById('log').innerText += msg + "\n";
+            console.log(msg);
+        }
+
+        // Helper to write string/bytes to WASM memory
+        function writeToMemory(data) {
+            const encoder = new TextEncoder();
+            const bytes = typeof data === 'string' ? encoder.encode(data) : data;
+            const ptr = wasm.alloc(bytes.length);
+            const view = new Uint8Array(memory.buffer, ptr, bytes.length);
+            view.set(bytes);
+            return { ptr, len: bytes.length };
+        }
+
+        function readInt32Array(ptr, length) {
+            // ptr is byte offset. i32 is 4 bytes.
+            // Check alignment (usually 4)
+            return new Int32Array(memory.buffer, ptr, length);
+        }
+
+        async function runProtocol() {
+            if (!wasm) return;
+            log("--- Starting Protocol ---");
+
+            // 1. Initialize System
+            // Generate valid random seed (32 bytes)
+            const seed = new Uint8Array(32);
+            crypto.getRandomValues(seed);
+
+            const seedBuf = writeToMemory(seed);
+            ctx = wasm.zkp_init(seedBuf.ptr);
+            wasm.free(seedBuf.ptr, seedBuf.len);
+
+            if (ctx === 0) {
+                log("Failed to initialize ZKP context.");
+                return;
+            }
+            log("System Initialized (Matrix A generated).");
+
+            const N = wasm.zkp_get_n();
+            const M = wasm.zkp_get_m();
+            log(`Dimensions: N=${N}, M=${M}`);
+
+            // 2. Derive Keys
+            log("Deriving keys from 'password' / 'saltsalt'...");
+            const pwdBuf = writeToMemory("password");
+            const saltBuf = writeToMemory("saltsalt");
+
+            const pkPtr = wasm.zkp_derive_secret(ctx, pwdBuf.ptr, pwdBuf.len, saltBuf.ptr, saltBuf.len);
+
+            // Clean up inputs
+            wasm.free(pwdBuf.ptr, pwdBuf.len);
+            wasm.free(saltBuf.ptr, saltBuf.len);
+
+            if (pkPtr === 0) {
+                log("Key derivation failed (Argon2 error or OOM).");
+                return;
+            }
+            log("Public Key Generated.");
+
+            // 3. Authentication Loop
+            let attempts = 0;
+            let success = false;
+
+            while (!success && attempts < 10) {
+                attempts++;
+                log(`[Attempt ${attempts}] Generating Commitment...`);
+
+                // A. Commitment
+                const wPtr = wasm.zkp_create_commitment(ctx);
+                if (wPtr === 0) { log("Commitment failed"); break; }
+
+                // B. Challenge (Simulated Server)
+                // Just use 0 or 1.
+                const challenge = Math.floor(Math.random() * 2);
+                log(`Server Challenge: ${challenge}`);
+
+                // C. Response
+                const zPtr = wasm.zkp_create_response(ctx, challenge);
+
+                if (zPtr !== 0) {
+                    log("Response generated (Rejection Sampling Passed).");
+
+                    // D. Verification
+                    const isValid = wasm.zkp_verify(ctx, wPtr, challenge, zPtr, pkPtr);
+                    if (isValid) {
+                        log("SUCCESS: Proof Verified!");
+                        success = true;
+                    } else {
+                        log("FAILURE: Verification rejected.");
+                        break; // Math error
+                    }
+
+                    // Cleanup response
+                    wasm.free_i32(zPtr, N);
+                } else {
+                    log("Response unsafe (Rejection). Retrying...");
+                }
+
+                // Cleanup commitment
+                wasm.free_i32(wPtr, M);
+            }
+
+            // Cleanup
+            wasm.free_i32(pkPtr, M);
+            wasm.zkp_deinit(ctx);
+            log("Protocol Finished.");
+        }
+
+        loadWasm();
+    </script>
+</body>
+
+</html>

@@ -17,7 +17,7 @@
         "cl.h": "c"
     },
     "zig.formattingProvider": "zls",
-    "zig.path": "/home/mc/zls/zig-out/bin/zig",
+    "zig.path": "/home/mc/.zvm/master/zig",
     "zig.zls.path": "/home/mc/zls/zig-out/bin/zls",
     "[zig]": {
         "editor.suggest.insertMode": "replace",
