@@ -33,13 +33,15 @@ pub const LatticeZKP = struct {
     // Type aliases for clarity
     const VectorContainerTypeN = [dimension_secret_n]i32;
 
-    pub fn init(backing_allocator: std.mem.Allocator, seed: [32]u8) !*LatticeZKP {
+    // Initialize with a provided seed (Deterministic / WASM friendly)
+    pub fn initWithSeed(backing_allocator: std.mem.Allocator, seed: [32]u8) !*LatticeZKP {
         const self = try backing_allocator.create(LatticeZKP);
         self.allocator = backing_allocator;
         self.secret_key_s = null;
         self.internal_mask_y = null;
 
         self.prng = std.Random.DefaultCsprng.init(seed);
+
         // Allocate Matrix A (Mock generation)
         self.a_matrix = try backing_allocator.alloc(i32, dimension_secret_n * dimension_public_m);
 
@@ -51,6 +53,33 @@ pub const LatticeZKP = struct {
         }
 
         return self;
+    }
+
+    // Initialize with system entropy (reads /dev/urandom via POSIX, or random_get on WASI)
+    pub fn init(backing_allocator: std.mem.Allocator) !*LatticeZKP {
+        const builtin = @import("builtin");
+        var seed: [32]u8 = undefined;
+
+        switch (builtin.os.tag) {
+            .wasi => {
+                const rc = std.os.wasi.random_get(&seed, seed.len);
+                if (rc != .SUCCESS) return error.SystemResources;
+            },
+            else => {
+                // Low-level POSIX open - avoids std's Capability IO requirement
+                const fd = try std.posix.openat(std.posix.AT.FDCWD, "/dev/urandom", .{}, 0);
+                defer std.posix.close(fd);
+
+                var offset: usize = 0;
+                while (offset < seed.len) {
+                    const n = try std.posix.read(fd, seed[offset..]);
+                    if (n == 0) return error.UnexpectedEof;
+                    offset += n;
+                }
+            },
+        }
+
+        return initWithSeed(backing_allocator, seed);
     }
 
     pub fn deinit(self: *LatticeZKP) void {

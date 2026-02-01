@@ -55,14 +55,16 @@ pub fn main(process_init: std.process.Init) !void {
     try standard_output.print("Parameters: N={}, M={}, Q={}\n", .{ zone.LatticeZKP.dimension_secret_n, zone.LatticeZKP.dimension_public_m, zone.LatticeZKP.modulus_q });
 
     // 2. Initialize Protocol Context (Generates Matrix A)
+    // var seed: [32]u8 = undefined;
+    // try process_init.io.randomSecure(&seed);
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = general_purpose_allocator.deinit();
     const allocator = general_purpose_allocator.allocator();
 
-    var seed: [32]u8 = undefined;
-    try process_init.io.randomSecure(&seed);
+    // Prover Setup
+    // Initialize ZKP Prover (Generates Matrix A from random seed)
+    var prover = try zone.LatticeZKP.init(allocator); // Automatically seeds from /dev/urandom
 
-    var prover = try zone.LatticeZKP.init(allocator, seed);
     defer prover.deinit();
 
     // 3. Registration Phase

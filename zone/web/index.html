@@ -118,13 +118,8 @@
             log("--- Starting Protocol ---");
 
             // 1. Initialize System
-            // Generate valid random seed (32 bytes)
-            const seed = new Uint8Array(32);
-            crypto.getRandomValues(seed);
-
-            const seedBuf = writeToMemory(seed);
-            ctx = wasm.zkp_init(seedBuf.ptr);
-            wasm.free(seedBuf.ptr, seedBuf.len);
+            // Seeding handled internally via WASI random_get -> JS crypto.getRandomValues
+            ctx = wasm.zkp_init();
 
             if (ctx === 0) {
                 log("Failed to initialize ZKP context.");

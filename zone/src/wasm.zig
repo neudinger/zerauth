@@ -137,9 +137,8 @@ export fn free(ptr: [*]u8, len: usize) void {
 
 // --- ZKP Interface ---
 
-export fn zkp_init(seed_ptr: [*]const u8) ?*anyopaque {
-    const seed = seed_ptr[0..32].*;
-    const instance = zone.LatticeZKP.init(allocator, seed) catch return null;
+export fn zkp_init() ?*anyopaque {
+    const instance = zone.LatticeZKP.init(allocator) catch return null;
     return instance;
 }
 
