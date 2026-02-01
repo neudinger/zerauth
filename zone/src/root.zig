@@ -14,81 +14,81 @@ pub const LatticeZKP = struct {
     prng: std.Random.DefaultCsprng,
 
     // Internal state for ZKP protocol (Prover Role)
-    secret_s: ?[]i32 = null,
-    current_y: ?[]i32 = null,
+    secret_key_s: ?[]i32 = null,
+    internal_mask_y: ?[]i32 = null,
 
     // Constants for the scheme
-    pub const N: usize = 1024;
-    pub const M: usize = 256;
-    pub const Q: i32 = 1 << 23;
-    pub const Q_LIMIT: i32 = Q - 1;
+    pub const dimension_secret_n: usize = 1024;
+    pub const dimension_public_m: usize = 256;
+    pub const modulus_q: i32 = 1 << 23;
+    pub const modulus_limit: i32 = modulus_q - 1;
     // Rejection sampling bound (simplified)
-    pub const B: i32 = 1 << 14;
+    pub const rejection_limit: i32 = 1 << 14;
 
     // Type aliases for clarity
-    const Vec = [N]i32;
+    const VectorContainerTypeN = [dimension_secret_n]i32;
 
-    pub fn init(backing_allocator: std.mem.Allocator, io: Io) !*LatticeZKP {
+    pub fn init(backing_allocator: std.mem.Allocator, io_context: Io) !*LatticeZKP {
         const self = try backing_allocator.create(LatticeZKP);
         self.allocator = backing_allocator;
-        self.secret_s = null;
-        self.current_y = null;
+        self.secret_key_s = null;
+        self.internal_mask_y = null;
 
         // Initialize CSPRNG with system entropy (read /dev/urandom)
         var seed: [32]u8 = undefined;
         {
-            var f = try Io.Dir.openFileAbsolute(io, "/dev/urandom", .{});
-            defer f.close(io);
+            var urandom_file = try Io.Dir.openFileAbsolute(io_context, "/dev/urandom", .{});
+            defer urandom_file.close(io_context);
 
             // Read seed using readStreaming loop
-            var off: usize = 0;
-            while (off < seed.len) {
-                var iov = [_][]u8{seed[off..]};
-                const n = try f.readStreaming(io, &iov);
-                if (n == 0) return error.UnexpectedEof;
-                off += n;
+            var offset: usize = 0;
+            while (offset < seed.len) {
+                var iov = [_][]u8{seed[offset..]};
+                const bytes_read = try urandom_file.readStreaming(io_context, &iov);
+                if (bytes_read == 0) return error.UnexpectedEof;
+                offset += bytes_read;
             }
         }
         self.prng = std.Random.DefaultCsprng.init(seed);
 
         // Allocate Matrix A (Mock generation)
-        self.a_matrix = try backing_allocator.alloc(i32, N * M);
+        self.a_matrix = try backing_allocator.alloc(i32, dimension_secret_n * dimension_public_m);
 
         // Fill Matrix A with random values mod Q
-        var i: usize = 0;
+        var matrix_index: usize = 0;
         const random = self.prng.random();
-        while (i < N * M) : (i += 1) {
-            self.a_matrix[i] = random.intRangeLessThan(i32, 0, Q);
+        while (matrix_index < dimension_secret_n * dimension_public_m) : (matrix_index += 1) {
+            self.a_matrix[matrix_index] = random.intRangeLessThan(i32, 0, modulus_q);
         }
 
         return self;
     }
 
     pub fn deinit(self: *LatticeZKP) void {
-        if (self.secret_s) |s| self.allocator.free(s);
-        if (self.current_y) |y| self.allocator.free(y);
+        if (self.secret_key_s) |s_ptr| self.allocator.free(s_ptr);
+        if (self.internal_mask_y) |y_ptr| self.allocator.free(y_ptr);
         self.allocator.free(self.a_matrix);
         self.allocator.destroy(self);
     }
 
     /// Derive secret key 's' from password and calculate public key 't = As'
     /// Returns public key 't' (caller owns memory)
-    pub fn derive_secret(self: *LatticeZKP, password: []const u8, salt: []const u8, io: Io) ![]i32 {
+    pub fn derive_secret(self: *LatticeZKP, password: []const u8, salt: []const u8, io_context: Io) ![]i32 {
         var seed: [32]u8 = undefined;
         // Use Argon2id for password hashing / KDF
         // Parameters: t=2, m=19MB, p=1 (OWASP recommendations, scaled down for demo speed)
-        var params = crypto.pwhash.argon2.Params.owasp_2id;
-        params.t = 2; // Lower computation for demo
-        params.m = 1024; // Lower memory for demo
+        var argon2_params = crypto.pwhash.argon2.Params.owasp_2id;
+        argon2_params.t = 2; // Lower computation for demo
+        argon2_params.m = 1024; // Lower memory for demo
 
         try crypto.pwhash.argon2.kdf(
             self.allocator,
             &seed,
             password,
             salt,
-            params,
+            argon2_params,
             .argon2id,
-            io,
+            io_context,
         );
 
         // Expand seed into secret vector 's' (small coefficients for LWE)
@@ -97,111 +97,112 @@ pub const LatticeZKP = struct {
         const secret_random = secret_prng.random();
 
         // 's' must be small, e.g., ternary {-1, 0, 1} or small Gaussian (simplified here)
-        const s = try self.allocator.alloc(i32, M);
+        const secret_key_s_local = try self.allocator.alloc(i32, dimension_secret_n);
 
-        for (s) |*coeff| {
+        for (secret_key_s_local) |*coefficient| {
             // Random in [-2, 2]
-            coeff.* = secret_random.intRangeAtMost(i32, -2, 2);
+            coefficient.* = secret_random.intRangeAtMost(i32, -2, 2);
         }
 
         // Store 's' in self for later ZKP steps
-        if (self.secret_s) |old_s| self.allocator.free(old_s);
-        self.secret_s = s;
+        if (self.secret_key_s) |old_s| self.allocator.free(old_s);
+        self.secret_key_s = secret_key_s_local;
 
         // Calculate t = A * s mod Q
         // t is size N
-        const t = try self.allocator.alloc(i32, N);
+        const public_key_t = try self.allocator.alloc(i32, dimension_public_m);
         // Do Matrix-Vector multiplication
-        self.mul_matrix_vector(s, t);
+        self.mul_matrix_vector(secret_key_s_local, public_key_t);
 
-        return t;
+        return public_key_t;
     }
 
     /// Step 1: Prover generates 'y' and commitment 'w = Ay'
     /// Returns 'w' (caller owns memory).
     pub fn create_commitment(self: *LatticeZKP) ![]i32 {
         // Generate y (size M), with coeff in higher range than s
-        const y = try self.allocator.alloc(i32, M);
+        const ephemeral_mask_y = try self.allocator.alloc(i32, dimension_secret_n);
 
         const random = self.prng.random();
-        for (y) |*val| {
+        for (ephemeral_mask_y) |*mask_value| {
             // Range significantly larger than challenge * s range
-            val.* = random.intRangeLessThan(i32, -B, B);
+            mask_value.* = random.intRangeLessThan(i32, -rejection_limit, rejection_limit);
         }
 
         // Store y
-        if (self.current_y) |old_y| self.allocator.free(old_y);
-        self.current_y = y;
+        if (self.internal_mask_y) |old_y| self.allocator.free(old_y);
+        self.internal_mask_y = ephemeral_mask_y;
 
         // w = A * y
-        const w = try self.allocator.alloc(i32, N);
-        self.mul_matrix_vector(y, w);
-        return w;
+        const commitment_vector_w = try self.allocator.alloc(i32, dimension_public_m);
+        self.mul_matrix_vector(ephemeral_mask_y, commitment_vector_w);
+        return commitment_vector_w;
     }
 
     /// Step 2: Prover computes z = y + c*s
     /// Here c is a scalar challenge (0 or 1).
-    pub fn create_response(self: *LatticeZKP, challenge: i32) ?[]i32 {
-        if (self.secret_s == null or self.current_y == null) return null;
+    pub fn create_response(self: *LatticeZKP, challenge_c: i32) ?[]i32 {
+        if (self.secret_key_s == null or self.internal_mask_y == null) return null;
 
-        const s = self.secret_s.?;
-        const y = self.current_y.?;
+        const secret_key_s_local = self.secret_key_s.?;
+        const internal_mask_y_local = self.internal_mask_y.?;
 
-        const z = self.allocator.alloc(i32, M) catch return null;
+        const response_vector_z = self.allocator.alloc(i32, dimension_secret_n) catch return null;
 
         // z = y + c*s
         // Check norms for Rejection Sampling
-        var valid = true;
-        for (z, 0..) |*val, i| {
-            const val_calc = y[i] + challenge * s[i];
+        var is_valid = true;
+        for (response_vector_z, 0..) |*response_val, loop_idx| {
+            const val_calc = internal_mask_y_local[loop_idx] + challenge_c * secret_key_s_local[loop_idx];
             // Rejection sampling check: |z| should be < B - limit
             // Simplistic check
-            if (val_calc > (B - 100) or val_calc < (-B + 100)) {
-                valid = false;
+            if (val_calc > (rejection_limit - 100) or val_calc < (-rejection_limit + 100)) {
+                is_valid = false;
             }
-            val.* = val_calc;
+            response_val.* = val_calc;
         }
 
-        if (!valid) {
-            self.allocator.free(z);
+        if (!is_valid) {
+            self.allocator.free(response_vector_z);
             return null;
         }
-        return z;
+        return response_vector_z;
     }
 
     /// Verifier checks if Az = w + ct
-    pub fn verify(self: *LatticeZKP, w: []const i32, c: i32, z: []const i32, t: []const i32) bool {
+    pub fn verify(self: *LatticeZKP, commitment_vector_w: []const i32, challenge_c: i32, response_vector_z: []const i32, public_key_t: []const i32) bool {
         // Compute Az
         // Use alignedAlloc for potential SIMD optimization in matrix mul
-        const az = self.allocator.alignedAlloc(i32, mem.Alignment.of(Vec), N) catch return false;
-        defer self.allocator.free(az);
+        const lhs_matrix_product = self.allocator.alignedAlloc(i32, mem.Alignment.of(VectorContainerTypeN), dimension_public_m) catch return false;
+        defer self.allocator.free(lhs_matrix_product);
 
-        self.mul_matrix_vector(z, az);
+        self.mul_matrix_vector(response_vector_z, lhs_matrix_product);
 
         // Compute w + ct
-        for (az, 0..) |elem, i| {
-            const rhs = (w[i] + c * t[i]); // mod Q ideally
-            const diff = @mod(elem - rhs, Q);
+        for (lhs_matrix_product, 0..) |element_lhs, loop_idx| {
+            const rhs_value = (commitment_vector_w[loop_idx] + challenge_c * public_key_t[loop_idx]); // mod Q ideally
+            const diff = @mod(element_lhs - rhs_value, modulus_q);
             if (diff != 0) return false;
         }
         return true;
     }
 
     // Internal Helper
-    fn mul_matrix_vector(self: *LatticeZKP, vec_in: []const i32, vec_out: []i32) void {
+
+    fn mul_matrix_vector(self: *LatticeZKP, input_vector: []const i32, output_vector: []i32) void {
         // Naive O(N*M)
-        @memset(vec_out, 0);
-        var i: usize = 0;
-        while (i < N) : (i += 1) {
-            var dot: i64 = 0;
-            var j: usize = 0;
-            while (j < M) : (j += 1) {
+        @memset(output_vector, 0);
+        var row_index: usize = 0;
+        while (row_index < dimension_public_m) : (row_index += 1) {
+            var dot_product: i64 = 0;
+            var col_index: usize = 0;
+            while (col_index < dimension_secret_n) : (col_index += 1) {
                 // A is flattened N*M. Row major
                 // A[i][j] = a_matrix[i*M + j]
-                const val = self.a_matrix[i * M + j];
-                dot += @as(i64, val) * vec_in[j];
+                const matrix_val = self.a_matrix[row_index * dimension_secret_n + col_index];
+                dot_product += @as(i64, matrix_val) * input_vector[col_index];
             }
-            vec_out[i] = @intCast(@mod(dot, Q));
+            output_vector[row_index] = @intCast(@mod(dot_product, modulus_q));
         }
     }
 };
