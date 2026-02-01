@@ -95,141 +95,82 @@
             const username = document.getElementById('reg-username').value;
             if (!username) {
                 showMessage("Please enter a username for registration.", true);
+                console.warn("Registration aborted: missing username");
                 return;
             }
 
             showMessage("Starting registration...");
+            console.log(`[REG] Starting registration for user: ${username}`);
 
             try {
                 // 1. Get challenge/options from backend
-                // const response = await fetch('/register/begin', {
-                //     method: 'POST',
-                //     headers: { 'Content-Type': 'application/json' },
-                //     body: JSON.stringify({ username })
-                // });
+                console.log("[REG] Requesting options from /register/begin...");
+                const response = await fetch('/register/begin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username })
+                });
 
-                // if (!response.ok) {
-                //     const error = await response.json();
-                //     throw new Error(error.error || `HTTP Error: ${response.status}`);
-                // }
+                if (!response.ok) {
+                    const error = await response.json();
+                    console.error("[REG] /register/begin failed:", error);
+                    throw new Error(error.detail || `HTTP Error: ${response.status}`);
+                }
 
-                // let options = await response.json();
-                // console.log("options ", options);
+                let options = await response.json();
+                console.log("[REG] Received options from server:", options);
 
-                // // 2. Convert base64url strings in options to ArrayBuffers for the WebAuthn API
-                // options.challenge = base64urlToBuffer(options.challenge);
-                // options.user.id = base64urlToBuffer(options.user.id);
-                // // The pubKeyCredParams is already fine
+                // 2. Convert base64url strings in options to ArrayBuffers for the WebAuthn API
+                options.challenge = base64urlToBuffer(options.challenge);
+                options.user.id = base64urlToBuffer(options.user.id);
+                // The pubKeyCredParams is already fine
 
-                // // 3. Call the WebAuthn API to create the credential
-                // const credential = await navigator.credentials.create({ publicKey: options });
+                console.log("[REG] Converted options for WebAuthn API:", options);
 
-                // // 4. Convert ArrayBuffers in the response back to base64url for the backend
-                // const responseData = {
-                //     id: credential.id,
-                //     rawId: bufferToBase64url(credential.rawId),
-                //     response: {
-                //         clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
-                //         attestationObject: bufferToBase64url(credential.response.attestationObject),
-                //         // Transports are optional, but good practice to include
-                //         transports: credential.response.getTransports ? credential.response.getTransports() : undefined,
-                //     },
-                //     type: credential.type,
-                // };
+                // 3. Call the WebAuthn API to create the credential
+                console.log("[REG] Calling navigator.credentials.create()...");
+                const credential = await navigator.credentials.create({ publicKey: options });
+                console.log("[REG] Credential created successfully:", credential);
 
-                // // 5. Send the response back to the backend for verification
-                // const verifyResponse = await fetch('/register/complete', {
-                //     method: 'POST',
-                //     headers: { 'Content-Type': 'application/json' },
-                //     body: JSON.stringify(responseData)
-                // });
-
-                // if (!verifyResponse.ok) {
-                //     const error = await verifyResponse.json();
-                //     throw new Error(error.error || `Verification Failed: ${verifyResponse.status}`);
-                // }
-
-                // const result = await verifyResponse.json();
-                // showMessage(result.message);
-                let challenge = base64urlToBuffer("2X9g5iJRVVZHDMMMNJAiYmpk5mckNdUcsdgBWx2Yfnn2FlJKBIGUz5I4KfDFRsPGDMjti1QVRgqCT8V29ijkjQ");
-                let user_id = base64urlToBuffer("userId");
-                if (!window.PublicKeyCredential) { /* Platform not capable. Handle error. */ }
-                console.log("challenge ", challenge);
-                var publicKey = {
-                    challenge: challenge, // The challenge must be produced by the server
-
-                    // Relying Party:
-                    rp: {
-                        name: "fido2.localhost"
+                // 4. Convert ArrayBuffers in the response back to base64url for the backend
+                const responseData = {
+                    id: credential.id,
+                    rawId: bufferToBase64url(credential.rawId),
+                    response: {
+                        clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
+                        attestationObject: bufferToBase64url(credential.response.attestationObject),
                     },
-
-                    // User:
-                    user: {
-                        id: user_id, // id may be generated by the server
-                        name: "a.user@example.com",
-                        displayName: "A User",
-                        icon: "https://example.com/image.png"
-                    },
-
-                    // This Relying Party will accept either an ES256 or RS256 credential, but
-                    // prefers an ES256 credential.
-                    // https://www.iana.org/assignments/cose/cose.xhtml#algorithms
-                    pubKeyCredParams: [
-                        // Ed25519
-                        // ESP256 - 9 	ECDSA using P - 256 curve and SHA - 256
-                        {
-                            type: "public-key",
-                            alg: -7 // "ES256" as registered in the IANA COSE Algorithms registry
-                        },
-                        {
-                            type: "public-key",
-                            alg: -257 // Value registered by this specification for "RS256"
-                        }
-                    ],
-
-                    excludeCredentials: [],
-                    attestation: 'none',
-                    timeout: 60000,
-                    extensions: { "loc": true }  // Include location information in attestation
-                };
-                console.log("publicKey ", publicKey);
-
-                const publicKeyCredentialCreationOptions = {
-                    // ... challenge, rp, user info ...
-
-                    authenticatorSelection: {
-                        // 'platform' tells the browser to use the internal authenticator
-                        // (TPM, Secure Enclave, etc.) rather than a USB key (YubiKey).
-                        authenticatorAttachment: 'platform',
-
-                        userVerification: 'required', // Triggers PIN/Biometrics
-                        requireResidentKey: false
-                    },
-
-                    // Optional: Request direct attestation if you need to PROVE 
-                    // to the server that a real TPM is being used.
-                    attestation: 'direct',
-
-                    pubKeyCredParams: [
-                        { type: "public-key", alg: -7 }, // ES256 (ECDSA w/ SHA-256)
-                        { type: "public-key", alg: -257 } // RS256 (RSA w/ SHA-256)
-                    ]
+                    type: credential.type,
                 };
 
-                // Note: The following call will cause the authenticator to display UI.
-                navigator.credentials.create({ publicKey: publicKey })
-                    .then(function (attestation) {
-                        // Send new credential info to server for verification and registration.
-                        console.log("attestation : ", JSON.stringify(attestation));
-                    }).catch(function (err) {
-                        // No acceptable authenticator or user refused consent. Handle appropriately.
-                        console.log("err ", err);
-                    });
+                // Transports are optional
+                if (credential.response.getTransports) {
+                    responseData.response.transports = credential.response.getTransports();
+                }
 
+                console.log("[REG] Prepared response data for server verification:", responseData);
+
+                // 5. Send the response back to the backend for verification
+                console.log("[REG] Sending credential to /register/complete...");
+                const verifyResponse = await fetch('/register/complete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(responseData)
+                });
+
+                if (!verifyResponse.ok) {
+                    const error = await verifyResponse.json();
+                    console.error("[REG] /register/complete failed:", error);
+                    throw new Error(error.detail || `Verification Failed: ${verifyResponse.status}`);
+                }
+
+                const result = await verifyResponse.json();
+                console.log("[REG] Registration complete. Result:", result);
+                showMessage(result.message);
 
             } catch (error) {
                 showMessage(`Registration failed: ${error.message}`, true);
-                console.error('Registration Error:', error);
+                console.error('[REG] Registration Error:', error);
             }
         }
 
@@ -239,140 +180,85 @@
             const username = document.getElementById('auth-username').value;
             if (!username) {
                 showMessage("Please enter a username for authentication.", true);
+                console.warn("Authentication aborted: missing username");
                 return;
             }
 
             showMessage("Starting authentication...");
-
+            console.log(`[AUTH] Starting authentication for user: ${username}`);
 
             try {
-                // 1. Get the challenge from the server (required for authentication)
-                // The server ensures this challenge is fresh and unique to prevent replay attacks.
-                let challenge = base64urlToBuffer("Abc_123_DEF_456_GHI_789_JKL_0000000000000000000");
+                // 1. Get challenge/options from backend
+                console.log("[AUTH] Requesting options from /auth/begin...");
+                const response = await fetch('/auth/begin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username })
+                });
 
-                // 2. Specify the credential IDs the authenticator should look for
-                // In a real app, this list comes from the server and contains the credential IDs
-                // previously registered by this user.
-                let credentialId1 = base64urlToBuffer("QJncNVNxqteWHTx3mmh_iXHDAv1Sx6tYBOOiGh2pSI0");
-                let credentialId2 = base64urlToBuffer("Zmpk5mckNdUcsdgBWx2Yfnn2FlJKBIGUz5I4KfD");
+                if (!response.ok) {
+                    const error = await response.json();
+                    console.error("[AUTH] /auth/begin failed:", error);
+                    throw new Error(error.detail || `HTTP Error: ${response.status}`);
+                }
 
+                let options = await response.json();
+                console.log("[AUTH] Received options from server:", options);
 
-                if (!window.PublicKeyCredential) { /* Platform not capable. Handle error. */ }
-                console.log("challenge ", challenge);
+                // 2. Convert base64url strings in options to ArrayBuffers
+                options.challenge = base64urlToBuffer(options.challenge);
+                // Credential IDs must also be converted to ArrayBuffer
+                if (options.allowCredentials) {
+                    options.allowCredentials = options.allowCredentials.map(cred => ({
+                        ...cred,
+                        id: base64urlToBuffer(cred.id)
+                    }));
+                }
 
-                var publicKey = {
-                    // The challenge must be produced by the server
-                    challenge: challenge,
+                console.log("[AUTH] Converted options for WebAuthn API:", options);
 
-                    // The list of public key credentials the client should attempt to use for authentication
-                    allowCredentials: [
-                        {
-                            // The credential ID from the server
-                            id: credentialId1,
-                            // Must be 'public-key'
-                            type: 'public-key',
-                            // Transports can hint to the browser where to look (e.g., USB, NFC, internal)
-                            transports: ['usb', 'nfc', 'internal']
-                        },
-                        {
-                            id: credentialId2,
-                            type: 'public-key'
-                        }
-                    ],
+                // 3. Call the WebAuthn API to get the assertion
+                console.log("[AUTH] Calling navigator.credentials.get()...");
+                const assertion = await navigator.credentials.get({ publicKey: options });
+                console.log("[AUTH] Assertion received successfully:", assertion);
 
-                    // The Relying Party ID is derived from the current site's origin (e.g., 'example.com')
-                    // It's usually safe to omit this and let the browser infer it, but it can be specified.
-                    // rpId: "demo.server.com",
-
-                    timeout: 60000,
-                    userVerification: 'preferred', // User consent (PIN/biometrics) is preferred, not strictly required
-                    extensions: { "loc": true } // Optional: Request location info if supported
-                };
-                console.log("publicKey for get ", publicKey);
-
-                const publicKeyCredentialRequestOptions = {
-                    challenge: Uint8Array.from(/* server challenge */),
-                    allowCredentials: [{
-                        id: Uint8Array.from(/* stored credential ID */),
-                        type: 'public-key',
-                        transports: ['internal'] // 'internal' hints at platform authenticators
-                    }],
-                    userVerification: 'required'
+                // 4. Convert ArrayBuffers in the response back to base64url for the backend
+                const responseData = {
+                    id: assertion.id,
+                    rawId: bufferToBase64url(assertion.rawId),
+                    response: {
+                        clientDataJSON: bufferToBase64url(assertion.response.clientDataJSON),
+                        authenticatorData: bufferToBase64url(assertion.response.authenticatorData),
+                        signature: bufferToBase64url(assertion.response.signature),
+                        userHandle: assertion.response.userHandle ? bufferToBase64url(assertion.response.userHandle) : null,
+                    },
+                    type: assertion.type,
                 };
 
+                console.log("[AUTH] Prepared response data for server verification:", responseData);
 
-                // Note: The following call will cause the authenticator to display UI for authentication.
-                navigator.credentials.get({ publicKey })
-                    .then(function (assertion) {
-                        // Send the resulting assertion to the server for verification.
-                        console.log("assertion : ", JSON.stringify(assertion));
-                    }).catch(function (err) {
-                        // User refused consent or no acceptable authenticator/credential found. Handle appropriately.
-                        console.log("err ", err);
-                    });
+                // 5. Send the response back to the backend for verification
+                console.log("[AUTH] Sending assertion to /auth/complete...");
+                const verifyResponse = await fetch('/auth/complete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(responseData)
+                });
+
+                if (!verifyResponse.ok) {
+                    const error = await verifyResponse.json();
+                    console.error("[AUTH] /auth/complete failed:", error);
+                    throw new Error(error.detail || `Verification Failed: ${verifyResponse.status}`);
+                }
+
+                const result = await verifyResponse.json();
+                console.log("[AUTH] Authentication complete. Result:", result);
+                showMessage(result.message);
 
             } catch (error) {
-                console.error('Authentication Error:', error);
+                showMessage(`Authentication failed: ${error.message}`, true);
+                console.error('[AUTH] Authentication Error:', error);
             }
-
-            // try {
-            // 1. Get challenge/options from backend
-            // const response = await fetch('/auth/begin', {
-            //     method: 'POST',
-            //     headers: { 'Content-Type': 'application/json' },
-            //     body: JSON.stringify({ username })
-            // });
-
-            // if (!response.ok) {
-            //     const error = await response.json();
-            //     throw new Error(error.error || `HTTP Error: ${response.status}`);
-            // }
-
-            //     let options = await response.json();
-
-            //     // 2. Convert base64url strings in options to ArrayBuffers
-            //     options.challenge = base64urlToBuffer(options.challenge);
-            //     // Credential IDs must also be converted to ArrayBuffer
-            //     options.allowCredentials = options.allowCredentials.map(cred => ({
-            //         ...cred,
-            //         id: base64urlToBuffer(cred.id)
-            //     }));
-
-            //     // 3. Call the WebAuthn API to get the assertion
-            //     const assertion = await navigator.credentials.get({ publicKey: options });
-
-            //     // 4. Convert ArrayBuffers in the response back to base64url for the backend
-            //     const responseData = {
-            //         id: assertion.id,
-            //         rawId: bufferToBase64url(assertion.rawId),
-            //         response: {
-            //             clientDataJSON: bufferToBase64url(assertion.response.clientDataJSON),
-            //             authenticatorData: bufferToBase64url(assertion.response.authenticatorData),
-            //             signature: bufferToBase64url(assertion.response.signature),
-            //             userHandle: assertion.response.userHandle ? bufferToBase64url(assertion.response.userHandle) : null,
-            //         },
-            //         type: assertion.type,
-            //     };
-
-            //     // 5. Send the response back to the backend for verification
-            //     const verifyResponse = await fetch('/auth/complete', {
-            //         method: 'POST',
-            //         headers: { 'Content-Type': 'application/json' },
-            //         body: JSON.stringify(responseData)
-            //     });
-
-            //     if (!verifyResponse.ok) {
-            //         const error = await verifyResponse.json();
-            //         throw new Error(error.error || `Verification Failed: ${verifyResponse.status}`);
-            //     }
-
-            //     const result = await verifyResponse.json();
-            //     showMessage(result.message);
-
-            // } catch (error) {
-            //     showMessage(`Authentication failed: ${error.message}`, true);
-            //     console.error('Authentication Error:', error);
-            // }
         }
     </script>
 </body>

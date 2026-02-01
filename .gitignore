@@ -99,3 +99,5 @@ cpd_file_list.txt
 */pkg
 */target
 *.lock
+.zig*
+zig-out/

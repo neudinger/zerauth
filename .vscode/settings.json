@@ -15,5 +15,15 @@
         "sha.h": "c",
         "extern.h": "c",
         "cl.h": "c"
-    }
+    },
+    "zig.formattingProvider": "zls",
+    "zig.path": "/home/mc/zls/zig-out/bin/zig",
+    "zig.zls.path": "/home/mc/zls/zig-out/bin/zls",
+    "[zig]": {
+        "editor.suggest.insertMode": "replace",
+        "editor.stickyScroll.defaultModel": "foldingProviderModel",
+        "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+        }
+    },
 }
