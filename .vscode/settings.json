@@ -17,8 +17,10 @@
         "cl.h": "c"
     },
     "zig.formattingProvider": "zls",
-    "zig.path": "/home/mc/.zvm/master/zig",
-    "zig.zls.path": "/home/mc/zls/zig-out/bin/zls",
+    // "zig.path": "/home/mc/.zvm/master/zig",
+    "zig.path": "/Users/kevin/.zvm/master/zig",
+    // "zig.zls.path": "/home/mc/zls/zig-out/bin/zls",
+    "zig.zls.path": "/Users/kevin/zls/zig-out/bin/zls",
     "[zig]": {
         "editor.suggest.insertMode": "replace",
         "editor.stickyScroll.defaultModel": "foldingProviderModel",

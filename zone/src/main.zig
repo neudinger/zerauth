@@ -31,7 +31,7 @@ pub fn main(process_init: std.process.Init) !void {
 
     // Stdout setup
     // Use std.Io.File directly attached to stdout file descriptor (1).
-    const stdout_file = std.Io.File{ .handle = std.posix.STDOUT_FILENO };
+    const stdout_file = std.Io.File{ .handle = std.posix.STDOUT_FILENO, .flags = .{ .nonblocking = false } };
     var stdout_buffer: [4096]u8 = undefined;
 
     // Create the buffered writer. Note that Io.File.Writer is a struct containing 'interface: Io.Writer'.

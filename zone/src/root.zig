@@ -20,9 +20,9 @@ pub const LatticeZKP = struct {
     internal_mask_y: ?[]i32 = null,
 
     // Constants for the scheme
-    pub const dimension_secret_n: usize = 1024;
-    pub const dimension_public_m: usize = 256;
-    pub const modulus_q: i32 = 1 << 23;
+    pub const dimension_secret_n: usize = 1 << 10; // 1024
+    pub const dimension_public_m: usize = dimension_secret_n / 4; // 256
+    pub const modulus_q: i32 = 1 << 23; // 8388608
     pub const modulus_limit: i32 = modulus_q - 1;
     // Rejection sampling bound (simplified)
     // Rejection sampling bound (simplified)
@@ -32,6 +32,11 @@ pub const LatticeZKP = struct {
 
     // Type aliases for clarity
     const VectorContainerTypeN = [dimension_secret_n]i32;
+    const VectorContainerTypeM = [dimension_public_m]i32;
+    //   static auto constexpr matrix_size = dimension_public_m * dimension_secret_n;
+    const matrix_size = dimension_public_m * dimension_secret_n;
+
+    // const MatrixContainerType = [dimension_public_m * dimension_secret_n]i32;
 
     // Initialize with a provided seed (Deterministic / WASM friendly)
     pub fn initWithSeed(backing_allocator: std.mem.Allocator, seed: [32]u8) !*LatticeZKP {
@@ -43,12 +48,12 @@ pub const LatticeZKP = struct {
         self.prng = std.Random.DefaultCsprng.init(seed);
 
         // Allocate Matrix A (Mock generation)
-        self.a_matrix = try backing_allocator.alloc(i32, dimension_secret_n * dimension_public_m);
+        self.a_matrix = try backing_allocator.alloc(i32, matrix_size);
 
         // Fill Matrix A with random values mod Q
         var matrix_index: usize = 0;
         const random = self.prng.random();
-        while (matrix_index < dimension_secret_n * dimension_public_m) : (matrix_index += 1) {
+        while (matrix_index < matrix_size) : (matrix_index += 1) {
             self.a_matrix[matrix_index] = random.intRangeLessThan(i32, 0, modulus_q);
         }
 
@@ -110,16 +115,29 @@ pub const LatticeZKP = struct {
         );
 
         // Expand seed into secret vector 's' (small coefficients for LWE)
-        // We use the derived key to seed a PRNG for deterministic 's' generation from password
-        var secret_prng = std.Random.DefaultCsprng.init(seed);
-        const secret_random = secret_prng.random();
+        // Match C++: Use Blake3 XOF to expand seed into bytes
+        const needed_bytes = dimension_secret_n * 4;
+        const expanded_bytes = try self.allocator.alloc(u8, needed_bytes);
+        defer self.allocator.free(expanded_bytes);
+
+        var hasher = crypto.hash.Blake3.init(.{});
+        hasher.update(&seed);
+        hasher.final(expanded_bytes);
 
         // 's' must be small, e.g., ternary {-1, 0, 1} or small Gaussian (simplified here)
         const secret_key_s_local = try self.allocator.alloc(i32, dimension_secret_n);
 
-        for (secret_key_s_local) |*coefficient| {
-            // Random in [-eta, eta]
-            coefficient.* = secret_random.intRangeAtMost(i32, -eta, eta);
+        const range: i32 = (2 * eta) + 1;
+
+        for (secret_key_s_local, 0..) |*coefficient, idx| {
+            // Map to range [-eta, eta]
+            // Read 4 bytes as u32 (Little Endian to match common behavior)
+            const chunk = expanded_bytes[idx * 4 ..][0..4];
+            const val = std.mem.readInt(u32, chunk, .little);
+
+            // _s[i] = (val % range) - eta;
+            const val_mod = @as(i32, @intCast(val % @as(u32, @intCast(range))));
+            coefficient.* = val_mod - eta;
         }
 
         // Store 's' in self for later ZKP steps
